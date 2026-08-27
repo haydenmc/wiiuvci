@@ -105,9 +105,13 @@ output — **copy it to your SD card root**. Options that shape it: `--widescree
 
 Nintendont's `boot.dol` is downloaded automatically (a pinned build); supply your own with
 `--nintendont <boot.dol>` (required with `--offline`). Booting on real hardware also needs a Wii
-**apploader** in the synthetic disc — supply one with `--apploader <apploader.img>` (e.g. the
-open-source [HackMii/gc-linux apploader](https://hackmii.com/2008/08/open-source-apploader-iso-template/)).
-Without it the package is structurally valid (and verifies against `nod`) but will not boot.
+**apploader** in the synthetic disc — by default the genuine one is **extracted from the base
+title's own game disc** (a `.wua` or NUS base carries the original VC game's NFS; an
+already-stripped base directory does not, in which case a warning is printed). Override with
+`--apploader <apploader.img>` (e.g. one extracted from a Wii disc you own, or the open-source
+[HackMii/gc-linux apploader](https://hackmii.com/2008/08/open-source-apploader-iso-template/)).
+Without an apploader the package is structurally valid (and verifies against `nod`) but will not
+boot.
 
 Nintendont handles video, controllers and widescreen, so the Wii `--deflicker`/`--half-vfilter`/
 `--remove-dithering` patches do not apply to GameCube titles.

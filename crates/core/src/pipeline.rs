@@ -202,7 +202,7 @@ pub fn run(mut config: Config, work_dir: &Path) -> Result<Summary> {
 /// `files/game.iso`), then reuse the Wii pipeline's NFS/packaging back half. Also emits an
 /// `nincfg.bin` next to the output for the user's SD card.
 fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
-    let gc_opts = config
+    let mut gc_opts = config
         .gamecube
         .take()
         .expect("run() dispatches here only when gamecube options are present");
@@ -219,11 +219,41 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     let staged = config.base.stage(work_dir)?;
 
     // 2. Author the synthetic Wii disc (Nintendont as main.dol + the GameCube image as game.iso).
+    // Without --apploader, recover the genuine apploader from the base title's own game disc
+    // (the reference tools inherit it the same way, by rebuilding the base's disc).
     if gc_opts.apploader.is_empty() {
-        log::warn!(
-            "no apploader supplied: the package will validate but will NOT boot on hardware \
-             (supply one with --apploader)"
-        );
+        let nfs_scratch = work_dir.join("base_nfs");
+        let extracted = config
+            .base
+            .materialize_original_nfs(&nfs_scratch)
+            .and_then(|dir| {
+                dir.map(|d| crate::apploader::extract_from_nfs(&d))
+                    .transpose()
+            });
+        // The materialized copy (up to a few hundred MB for archive/NUS bases) is only needed
+        // for the ~200 KiB read above.
+        let _ = std::fs::remove_dir_all(&nfs_scratch);
+        match extracted {
+            Ok(Some(app)) => {
+                log::info!(
+                    "using the apploader from the base title's own game disc \
+                     ({} bytes, {}, entry {:#010x})",
+                    app.bytes.len(),
+                    app.date,
+                    app.entry
+                );
+                gc_opts.apploader = app.bytes;
+            }
+            Ok(None) => log::warn!(
+                "no apploader: the base has no original game data to take one from, and none \
+                 was supplied — the package will validate but will NOT boot on hardware \
+                 (supply one with --apploader)"
+            ),
+            Err(e) => log::warn!(
+                "no apploader: extracting one from the base failed ({e}) — the package will \
+                 validate but will NOT boot on hardware (supply one with --apploader)"
+            ),
+        }
     }
     let disc_title = config.title.clone().unwrap_or_else(|| game_id.clone());
     let disc_path = work_dir.join("gc_disc.img");

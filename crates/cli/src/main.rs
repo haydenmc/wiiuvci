@@ -117,7 +117,8 @@ struct Cli {
     #[arg(long, value_name = "DOL")]
     nintendont: Option<PathBuf>,
 
-    /// GameCube: Wii `apploader.img` for the synthetic disc. Required to boot on hardware.
+    /// GameCube: Wii `apploader.img` for the synthetic disc (default: extracted from the base
+    /// title's own game disc).
     #[arg(long, value_name = "IMG")]
     apploader: Option<PathBuf>,
 
