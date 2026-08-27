@@ -111,6 +111,13 @@ pub struct GameCubeOptions {
     pub video_mode: nincfg::VideoMode,
     /// Emulate a memory card.
     pub memcard_emu: bool,
+    /// Memory-card size exponent (`nincfg.bin` `MemCardBlocks`, `0..=4`; `2` ⇒ 251 blocks, the
+    /// standard 512 KiB card). See [`nincfg::NincfgOptions::memcard_blocks`].
+    pub memcard_blocks: u8,
+    /// Maximum number of controllers (`0..=4`).
+    pub max_pads: u32,
+    /// Controller slot the Wii U GamePad occupies (`0..=3`).
+    pub wiiu_gamepad_slot: u32,
     /// Optional Gecko cheat file path (on SD) recorded in `nincfg.bin`.
     pub cheat_path: Option<String>,
 }
@@ -324,8 +331,10 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
                 language: gc_opts.language,
                 video_mode: gc_opts.video_mode,
                 memcard_emu: gc_opts.memcard_emu,
+                memcard_blocks: gc_opts.memcard_blocks,
+                max_pads: gc_opts.max_pads,
+                wiiu_gamepad_slot: gc_opts.wiiu_gamepad_slot,
                 cheat_path: gc_opts.cheat_path.clone(),
-                ..Default::default()
             });
             // Resolve --out to an absolute path first: a bare relative `--out` (e.g. `MyGame`,
             // with no parent component) would otherwise leave `parent()` ambiguous, landing
@@ -345,7 +354,9 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
             }
             std::fs::write(&nincfg_path, nincfg).map_err(|e| Error::io(&nincfg_path, e))?;
             log::info!(
-                "wrote {} — copy it to your SD card root for Nintendont",
+                "wrote {} — copy it to your SD card root for Nintendont. Note: Nintendont reads \
+                 this ONE file for every GC inject, so its settings (widescreen, language, video \
+                 mode, memory card, cheats, pads) apply to ALL installed GameCube titles",
                 nincfg_path.display()
             );
             Ok(())

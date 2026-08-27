@@ -101,7 +101,14 @@ is used as for Wii injects.
 
 Alongside the WUP package the tool writes a **`nincfg.bin`** (Nintendont's config) next to the
 output — **copy it to your SD card root**. Options that shape it: `--widescreen`, `--gc-language`,
-`--no-memcard`, and `--cheats <sd-path-to-.gct>`.
+`--gc-video <auto|ntsc|pal50|pal60|mpal|progressive|none>`, `--no-memcard`,
+`--gc-memcard-blocks <59|123|251|507|1019>`, `--gc-max-pads <0-4>`, `--gc-gamepad-slot <0-3>`,
+and `--cheats <sd-path-to-.gct>`.
+
+> **These settings are effectively global.** Nintendont reads the one `nincfg.bin` at the SD-card
+> root for *every* GC inject — the game itself always comes from the launched title (`di:/game.iso`),
+> but the settings from the most recently copied `nincfg.bin` apply to **all** installed GameCube
+> titles. If different games need different settings, keep per-game copies and swap the active one.
 
 Nintendont's `boot.dol` is downloaded automatically (a pinned build); supply your own with
 `--nintendont <boot.dol>` (required with `--offline`). Booting on real hardware also needs a Wii

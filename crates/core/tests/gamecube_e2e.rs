@@ -80,6 +80,9 @@ fn gamecube_injection_produces_package_and_nincfg() {
             language: Language::Auto,
             video_mode: VideoMode::Auto,
             memcard_emu: true,
+            memcard_blocks: 2,
+            max_pads: 4,
+            wiiu_gamepad_slot: 0,
             cheat_path: None,
         }),
     };
