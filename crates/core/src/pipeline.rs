@@ -273,7 +273,6 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
         disc_title: &disc_title,
         main_dol: &gc_opts.nintendont_dol,
         apploader: &gc_opts.apploader,
-        title_id: ids.title_id,
     };
     let mut authored = wii_author::author_gc_disc(gc.iso_stream(), iso_size, &inputs, &disc_path)?;
 

@@ -202,11 +202,11 @@ fn build_sys_blob(
     put_u32(&mut sys, 0x18, DISC_MAGIC_WII); // partition boot.bin Wii magic
     write_title(&mut sys[0x20..0x20 + 0x40], disc_title);
     put_u32(&mut sys, 0x60, 0x0101_0000); // "disable hash/encryption" boot flags
-    // FST load target in MEM1 and its reserved length; the apploader loads the FST here.
+                                          // FST load target in MEM1 and its reserved length; the apploader loads the FST here.
     put_u32(&mut sys, 0x430, 0x803F_FF60); // user position (FST address)
     put_u32(&mut sys, 0x434, 0x0006_0000); // user length
     put_u32(&mut sys, 0x438, 0x0424_FFF8); // (matches the reference template)
-    // bi2.bin fields the reference sets (country at +0x18 stays 0, as in the reference).
+                                           // bi2.bin fields the reference sets (country at +0x18 stays 0, as in the reference).
     put_u32(&mut sys, BOOT_BIN_LEN + 0x1C, 0x0000_0001);
     put_u32(&mut sys, BOOT_BIN_LEN + 0x20, 0x0000_0001);
     put_u32(&mut sys, BOOT_BIN_LEN + 0x24, 0x0000_0005);
@@ -257,6 +257,16 @@ fn write_title(dst: &mut [u8], title: &str) {
     dst[..n].copy_from_slice(&b[..n]);
 }
 
+/// A Wii disc title id (`00010000_<4-char game code>`) for the synthetic carrier disc. The Wii
+/// disc's ticket/TMD must identify a **Wii disc** (title type `0x00010000`), not the Wii U VC
+/// title that wraps it — a real Wii inject's disc carries a `00010000…` id, and a known-good
+/// TeconMoon GameCube inject does too (`00010000_"CEMU"`). Stamping the Wii U title id here (a
+/// `0005…` type) makes the vWii framework refuse to mount the disc.
+fn wii_disc_title_id(game_id: &[u8; 6]) -> u64 {
+    let code = u32::from_be_bytes([game_id[0], game_id[1], game_id[2], game_id[3]]);
+    0x0001_0000_0000_0000 | code as u64
+}
+
 /// Build a minimal fakesigned Wii ticket (0x2A4 bytes). The title key is arbitrary — the NFS path
 /// stores the disc already decrypted and never applies it (see [`crate::nfs`]).
 fn build_wii_ticket(title_id: u64) -> Vec<u8> {
@@ -267,6 +277,10 @@ fn build_wii_ticket(title_id: u64) -> Vec<u8> {
     t[0x1BF..0x1BF + 16].copy_from_slice(&[0xFE; 16]);
     t[0x1DC..0x1E4].copy_from_slice(&title_id.to_be_bytes());
     t[0x1F1] = 0; // common key index
+                  // Content-access permission mask (0x222, one bit per content index): grant access
+                  // to every content. Left zero, the framework treats the disc's content as
+                  // inaccessible; a valid ticket grants it (the reference inject sets this too).
+    t[0x222..0x242].copy_from_slice(&[0xFF; 0x20]);
     t
 }
 
@@ -276,12 +290,18 @@ fn build_wii_tmd(title_id: u64, content_size: u64, h3_hash: &[u8; 20]) -> Vec<u8
     let mut m = vec![0u8; TMD_LEN];
     put_u32(&mut m, 0x000, WII_SIG_RSA2048_SHA1); // signature (0x004..0x104) left zero = fakesigned
     m[0x140..0x140 + 26].copy_from_slice(b"Root-CA00000001-CP00000004");
+    // System version = the IOS the disc requires, as a title id (0x0000_0001_0000_00xx). Left
+    // zero, the vWii framework is asked to load IOS 0 and bails; the reference inject requires
+    // IOS35 (0x23), a standard vWii IOS present on every console.
+    m[0x184..0x18C].copy_from_slice(&0x0000_0001_0000_0023u64.to_be_bytes());
     m[0x18C..0x194].copy_from_slice(&title_id.to_be_bytes()); // title id
+    put_u32(&mut m, 0x194, 1); // title type: normal
+    m[0x198..0x19A].copy_from_slice(b"01"); // group id (matches the reference)
     m[0x1DE..0x1E0].copy_from_slice(&1u16.to_be_bytes()); // one content
                                                           // Content record 0 at 0x1E4: id, index, type, size, hash.
     put_u32(&mut m, 0x1E4, 0); // content id
     m[0x1E8..0x1EA].copy_from_slice(&0u16.to_be_bytes()); // index
-    m[0x1EA..0x1EC].copy_from_slice(&1u16.to_be_bytes()); // type: normal
+    m[0x1EA..0x1EC].copy_from_slice(&3u16.to_be_bytes()); // type (reference uses 0x0003 for the disc content)
     m[0x1EC..0x1F4].copy_from_slice(&content_size.to_be_bytes());
     m[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20].copy_from_slice(h3_hash);
     m
@@ -299,8 +319,6 @@ pub struct GcDiscInputs<'a> {
     /// `nod`-validation builds (the apploader is hash-covered data `nod` never executes); a real
     /// apploader is only required to boot on hardware.
     pub apploader: &'a [u8],
-    /// Title id recorded in the disc's Wii ticket/TMD (a don't-care for the decrypted NFS path).
-    pub title_id: u64,
 }
 
 /// Author a synthetic Wii disc booting Nintendont, with `iso` (`iso_size` bytes) embedded as
@@ -321,8 +339,8 @@ pub fn author_gc_disc(
         disc_title,
         main_dol,
         apploader,
-        title_id,
     } = *inputs;
+    let title_id = wii_disc_title_id(&game_id);
     let ioerr = |e| Error::io(out_path, e);
 
     if iso_size > MAX_ISO_SIZE {
@@ -598,7 +616,6 @@ mod tests {
                 disc_title: "GC Test",
                 main_dol: &[0u8; 32],
                 apploader: &[],
-                title_id: 0x0005_0000_1234_5678,
             },
             &disc_path,
         );
@@ -639,7 +656,6 @@ mod tests {
             .collect();
         let main_dol: Vec<u8> = (0..4096u32).map(|i| (i ^ 0xA5) as u8).collect();
         let game_id = *b"GM2E8P";
-        let title_id = 0x0005_0000_1234_5678u64;
 
         let out = tempfile::tempdir().unwrap();
         let disc_path = out.path().join("gc_disc.img");
@@ -652,7 +668,6 @@ mod tests {
                 disc_title: "GC Test",
                 main_dol: &main_dol,
                 apploader: &[], // empty placeholder — nod never executes it
-                title_id,
             },
             &disc_path,
         )
@@ -749,7 +764,6 @@ mod tests {
                 disc_title: "Super Monkey Ball 2",
                 main_dol: &main_dol,
                 apploader: &[],
-                title_id: 0x0005_0000_1000_0000,
             },
             &disc_path,
         )

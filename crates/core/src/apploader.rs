@@ -192,7 +192,6 @@ mod tests {
                 disc_title: "GC Test",
                 main_dol: &main_dol,
                 apploader: &apploader,
-                title_id: 0x0005_0000_1234_5678,
             },
             &disc_path,
         )

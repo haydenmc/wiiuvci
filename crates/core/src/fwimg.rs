@@ -75,16 +75,31 @@ pub const MEMPROT: BytePatch = BytePatch {
     all: false,
 };
 
-// Additional `fw.img` patches a *homebrew* (Nintendont) disc needs beyond fakesign/AHBPROT/
-// MEMPROT. A retail Wii inject boots without these, but a fakesigned homebrew carrier disc does
-// not — these neuter the remaining disc-interface / title-content verification in the vWii Wii-
-// mode firmware (two of them splice in a small code hook). Their exact IOS semantics aren't
-// documented here; the find/replace bytes are derived byte-for-byte from a known-good TeconMoon
-// GameCube inject (with these six added, our patched `fw.img` reproduces theirs exactly). Each
-// pattern is unique in the reference base `fw.img`; a base that lacks one skips it (no-op).
-pub const HB1: BytePatch = BytePatch {
-    name: "homebrew-1",
-    group: "homebrew-1",
+// Controller-input patches for a homebrew (Nintendont) title, matching `nfs2iso2nfs`'s
+// `-homebrew` + `-passthrough` sets (which TeconMoon/gc-wiiu-injector apply for GameCube injects).
+// These are NOT boot/signature patches — the boot-critical ones are fakesign/AHBPROT/MEMPROT
+// above. `-passthrough` ([`PASSTHROUGH_1`]–[`PASSTHROUGH_3`]) lets homebrew keep using real Wii
+// Remotes; the three Nintendont patches ([`NINTENDONT_1`]–[`NINTENDONT_3`], part of `-homebrew`)
+// enable proper input support in Nintendont. Byte patterns taken from FIX94's `nfs2iso2nfs`
+// (Program.cs); with all six applied our patched `fw.img` reproduces a known-good TeconMoon
+// inject's byte-for-byte. Each pattern is unique in the reference base; a base lacking one is a
+// no-op.
+
+/// `-passthrough` #1: `20 4B 01 68 18 47 70 00` → `20 00` at +3 (here matched with leading context).
+pub const PASSTHROUGH_1: BytePatch = BytePatch {
+    name: "wiimote-passthrough-1",
+    group: "wiimote-passthrough-1",
+    find: &[
+        0x13, 0x8B, 0xB0, 0x20, 0x4B, 0x01, 0x68, 0x18, 0x47, 0x70, 0x00, 0x00, 0x13, 0x8B,
+    ],
+    at: 6,
+    write: &[0x20, 0x00],
+    all: false,
+};
+/// `-passthrough` #2: branch to the passthrough helper (`28 00 D0 03 49 02 22 09` site).
+pub const PASSTHROUGH_2: BytePatch = BytePatch {
+    name: "wiimote-passthrough-2",
+    group: "wiimote-passthrough-2",
     find: &[
         0x13, 0x8B, 0xB0, 0x68, 0xB5, 0x00, 0x28, 0x00, 0xD0, 0x03, 0x49, 0x02, 0x22, 0x09, 0xF0,
         0x04, 0xFF, 0x1D, 0xBD, 0x00, 0x13, 0x8B, 0xA0, 0x04,
@@ -95,19 +110,10 @@ pub const HB1: BytePatch = BytePatch {
     ],
     all: false,
 };
-pub const HB2: BytePatch = BytePatch {
-    name: "homebrew-2",
-    group: "homebrew-2",
-    find: &[
-        0x13, 0x8B, 0xB0, 0x20, 0x4B, 0x01, 0x68, 0x18, 0x47, 0x70, 0x00, 0x00, 0x13, 0x8B,
-    ],
-    at: 6,
-    write: &[0x20, 0x00],
-    all: false,
-};
-pub const HB3: BytePatch = BytePatch {
-    name: "homebrew-3",
-    group: "homebrew-3",
+/// `-passthrough` #3: `F0 01 FA B9` → `F7 FC FB 95` (retarget a `bl`).
+pub const PASSTHROUGH_3: BytePatch = BytePatch {
+    name: "wiimote-passthrough-3",
+    group: "wiimote-passthrough-3",
     find: &[
         0x1C, 0x28, 0x46, 0x69, 0x22, 0x09, 0xF0, 0x01, 0xFA, 0xB9, 0x20, 0x00, 0xE7, 0xBE, 0x78,
         0x63,
@@ -116,9 +122,25 @@ pub const HB3: BytePatch = BytePatch {
     write: &[0xF7, 0xFC, 0xFB, 0x95],
     all: false,
 };
-pub const HB4: BytePatch = BytePatch {
-    name: "homebrew-4",
-    group: "homebrew-4",
+/// Nintendont input patch #1 (`B0 BA 1C 0F` site): splice an ARM code hook.
+pub const NINTENDONT_1: BytePatch = BytePatch {
+    name: "nintendont-1",
+    group: "nintendont-1",
+    find: &[
+        0xFB, 0xF8, 0xFF, 0xFF, 0xFB, 0xF6, 0xB5, 0xF0, 0x46, 0x5F, 0x46, 0x56, 0x46, 0x4D, 0x46,
+        0x44, 0xB4, 0xF0, 0xB0, 0xBA, 0x1C, 0x0F, 0x1C, 0x15, 0x93, 0x18, 0x24, 0x00,
+    ],
+    at: 6,
+    write: &[
+        0xE5, 0x9F, 0x10, 0x04, 0xE5, 0x91, 0x00, 0x00, 0xE1, 0x2F, 0xFF, 0x10, 0x12, 0xFF, 0xFF,
+        0xE0,
+    ],
+    all: false,
+};
+/// Nintendont input patch #2 (`68 4B 2B 06` site): splice a THUMB code hook.
+pub const NINTENDONT_2: BytePatch = BytePatch {
+    name: "nintendont-2",
+    group: "nintendont-2",
     find: &[
         0xF8, 0xF2, 0xF0, 0x00, 0xFF, 0x4E, 0x68, 0x4B, 0x2B, 0x06, 0xD1, 0x0C, 0x68, 0x8B, 0x2B,
         0x00, 0xD1, 0x09, 0x68, 0xC8, 0x68, 0x42, 0x23, 0xA9, 0x00, 0x9B, 0x42, 0x9A, 0xD1, 0x03,
@@ -131,23 +153,10 @@ pub const HB4: BytePatch = BytePatch {
     ],
     all: false,
 };
-pub const HB5: BytePatch = BytePatch {
-    name: "homebrew-5",
-    group: "homebrew-5",
-    find: &[
-        0xFB, 0xF8, 0xFF, 0xFF, 0xFB, 0xF6, 0xB5, 0xF0, 0x46, 0x5F, 0x46, 0x56, 0x46, 0x4D, 0x46,
-        0x44, 0xB4, 0xF0, 0xB0, 0xBA, 0x1C, 0x0F, 0x1C, 0x15, 0x93, 0x18, 0x24, 0x00,
-    ],
-    at: 6,
-    write: &[
-        0xE5, 0x9F, 0x10, 0x04, 0xE5, 0x91, 0x00, 0x00, 0xE1, 0x2F, 0xFF, 0x10, 0x12, 0xFF, 0xFF,
-        0xE0,
-    ],
-    all: false,
-};
-pub const HB6: BytePatch = BytePatch {
-    name: "homebrew-6",
-    group: "homebrew-6",
+/// Nintendont input patch #3: flips the byte after the `0D 80 00 00` marker (`02` → `03`).
+pub const NINTENDONT_3: BytePatch = BytePatch {
+    name: "nintendont-3",
+    group: "nintendont-3",
     find: &[
         0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
     ],
@@ -161,10 +170,20 @@ pub const HB6: BytePatch = BytePatch {
 /// variant — so we try both; a missing one is a no-op.
 pub const FAKESIGN_PATCHES: &[BytePatch] = &[FAKESIGN_A, FAKESIGN_B];
 
-/// The patch set for a homebrew-booting (Nintendont) title: fakesign + AHBPROT + MEMPROT plus the
-/// six additional homebrew-disc verification patches ([`HB1`]–[`HB6`]).
+/// The patch set for a homebrew-booting (Nintendont) title: the boot-critical fakesign + AHBPROT +
+/// MEMPROT patches plus the Wii-Remote-passthrough and Nintendont controller-input patches
+/// (`nfs2iso2nfs` `-homebrew`/`-passthrough`).
 pub const HOMEBREW_PATCHES: &[BytePatch] = &[
-    FAKESIGN_A, FAKESIGN_B, AHBPROT, MEMPROT, HB1, HB2, HB3, HB4, HB5, HB6,
+    FAKESIGN_A,
+    FAKESIGN_B,
+    AHBPROT,
+    MEMPROT,
+    PASSTHROUGH_1,
+    PASSTHROUGH_2,
+    PASSTHROUGH_3,
+    NINTENDONT_1,
+    NINTENDONT_2,
+    NINTENDONT_3,
 ];
 
 /// Apply `patches` to `data` in place, returning the names of the patches that matched. A patch
@@ -298,12 +317,12 @@ mod tests {
                 "fakesign",
                 "AHBPROT",
                 "MEMPROT",
-                "homebrew-1",
-                "homebrew-2",
-                "homebrew-3",
-                "homebrew-4",
-                "homebrew-5",
-                "homebrew-6",
+                "wiimote-passthrough-1",
+                "wiimote-passthrough-2",
+                "wiimote-passthrough-3",
+                "nintendont-1",
+                "nintendont-2",
+                "nintendont-3",
             ]
         );
     }
