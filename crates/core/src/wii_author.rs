@@ -14,14 +14,16 @@
 //! Layout (all offsets confirmed against `nod` and [`crate::disc_patch`]):
 //!
 //! ```text
-//! 0x00000  disc header (game id, Wii magic 0x5D1C9EA3 @0x18, disc title)
-//! 0x40000  partition table: one group, one DATA partition
-//! 0x4E000  region info
-//! 0x50000  partition:
-//!            +0x00000  ticket (0x2A4, fakesigned, arbitrary title key)
-//!            +0x002C0  TMD    (one content, hash = SHA1(H3 table), fakesigned)
-//!            +0x08000  H3 table (0x18000)
-//!            +0x20000  data  (0x8000 clusters: 0x400 hash block + 0x7C00 data)
+//! 0x000000   disc header (game id, Wii magic 0x5D1C9EA3 @0x18, disc title)
+//! 0x040000   partition table: one group, one DATA partition
+//! 0x04E000   region info
+//! (sparse gap — never stored)
+//! 0xF800000  partition (the retail single-layer offset — required to boot on hardware):
+//!              +0x00000  ticket (0x2A4, fakesigned, arbitrary title key)
+//!              +0x002C0  TMD    (one content, hash = SHA1(H3 table), fakesigned)
+//!              +0x004E0  cert chain (Root-CA / CP / XS, from the base disc)
+//!              +0x08000  H3 table (0x18000)
+//!              +0x20000  data  (0x8000 clusters: 0x400 hash block + 0x7C00 data)
 //! ```
 //!
 //! The partition data, in its logical (hash-stripped) address space, is:
@@ -54,9 +56,16 @@ const MAX_LOGICAL_SIZE: u64 = MAX_H3_GROUPS as u64 * GROUP_LOGICAL_SIZE;
 const MAX_ISO_SIZE: u64 = u32::MAX as u64;
 
 // Absolute disc offsets.
-const PART_ABS: u64 = 0x50000;
+// The data partition sits at the retail single-layer offset. A real Wii disc (and every working
+// inject) places it here; a compact layout right after the header is what a stripped homebrew disc
+// would use, but the vWii framework does not boot it. The gap between the header and the partition
+// is never stored (sparse NFS / sparse scratch file).
+const PART_ABS: u64 = 0xF80_0000;
 const PARTITION_TABLE_ABS: u64 = 0x40000;
 const REGION_INFO_ABS: u64 = 0x4E000;
+/// Bytes of the disc before the partition worth materializing: disc header, partition table
+/// (0x40000) and region info (0x4E000). Everything up to [`PART_ABS`] after this is a sparse hole.
+const DISC_HEADER_LEN: usize = 0x50000;
 
 // Partition-relative offsets.
 const TICKET_LEN: usize = 0x2A4;
@@ -416,13 +425,14 @@ pub fn author_gc_disc(
     let ticket = build_wii_ticket(title_id);
     let tmd = build_wii_tmd(title_id, data_size, &content_hash);
 
-    // Now build and write the 0x70000-byte prefix (disc header, partition table, partition
-    // header) with the computed H3 table and TMD.
-    let prefix = build_prefix(
-        &game_id, disc_title, &ticket, &tmd, cert_chain, &h3_table, data_size,
-    )?;
+    // Write the disc header (at 0) and the partition header (at PART_ABS) with the computed H3
+    // table and TMD. The gap between them is left as a sparse hole in the scratch file.
+    let disc_header = build_disc_header(&game_id, disc_title);
     file.seek(SeekFrom::Start(0)).map_err(ioerr)?;
-    file.write_all(&prefix).map_err(ioerr)?;
+    file.write_all(&disc_header).map_err(ioerr)?;
+    let part_header = build_partition_header(&ticket, &tmd, cert_chain, &h3_table, data_size)?;
+    file.seek(SeekFrom::Start(PART_ABS)).map_err(ioerr)?;
+    file.write_all(&part_header).map_err(ioerr)?;
     file.flush().map_err(ioerr)?;
 
     let disc_size = DATA_ABS + total_clusters as u64 * SECTOR;
@@ -499,20 +509,11 @@ fn fill_cluster_data(
     Ok(())
 }
 
-/// Build the 0x70000-byte disc prefix: disc header, partition table, region info, and the
-/// partition header (ticket, header offset fields, TMD, and H3 table).
-fn build_prefix(
-    game_id: &[u8; 6],
-    disc_title: &str,
-    ticket: &[u8],
-    tmd: &[u8],
-    cert_chain: &[u8],
-    h3_table: &[u8],
-    data_size: u64,
-) -> Result<Vec<u8>> {
-    let mut p = vec![0u8; DATA_ABS as usize];
-
-    // Disc header.
+/// Build the [`DISC_HEADER_LEN`]-byte disc header: disc id/magic/title, the partition table
+/// (pointing at [`PART_ABS`]), and the region info. Written at disc offset 0; the space between
+/// this and the partition is a sparse hole.
+fn build_disc_header(game_id: &[u8; 6], disc_title: &str) -> Vec<u8> {
+    let mut p = vec![0u8; DISC_HEADER_LEN];
     p[0..6].copy_from_slice(game_id);
     put_u32(&mut p, 0x18, DISC_MAGIC_WII);
     write_title(&mut p[0x20..0x20 + 0x40], disc_title);
@@ -531,30 +532,39 @@ fn build_prefix(
         REGION_INFO_ABS as usize,
         region_info_for(game_id[3]),
     );
+    p
+}
 
-    // Partition header.
-    let ph = PART_ABS as usize;
-    p[ph..ph + ticket.len()].copy_from_slice(ticket);
-    put_u32(&mut p, ph + 0x2A4, tmd.len() as u32); // tmd_size
-    put_u32(&mut p, ph + 0x2A8, (TMD_PART_OFF >> 2) as u32); // tmd_offset >> 2
-    put_u32(&mut p, ph + 0x2AC, cert_chain.len() as u32); // cert_chain_size
-    put_u32(&mut p, ph + 0x2B0, (CERT_PART_OFF >> 2) as u32); // cert_chain_offset >> 2
-    put_u32(&mut p, ph + 0x2B4, (H3_PART_OFF >> 2) as u32); // h3_table_offset >> 2
-    put_u32(&mut p, ph + 0x2B8, (DATA_PART_OFF >> 2) as u32); // data_offset >> 2
+/// Build the [`DATA_PART_OFF`]-byte partition header: ticket, the header offset table, TMD, cert
+/// chain, and H3 table. Written at [`PART_ABS`].
+fn build_partition_header(
+    ticket: &[u8],
+    tmd: &[u8],
+    cert_chain: &[u8],
+    h3_table: &[u8],
+    data_size: u64,
+) -> Result<Vec<u8>> {
+    let mut p = vec![0u8; DATA_PART_OFF as usize];
+    p[..ticket.len()].copy_from_slice(ticket);
+    put_u32(&mut p, 0x2A4, tmd.len() as u32); // tmd_size
+    put_u32(&mut p, 0x2A8, (TMD_PART_OFF >> 2) as u32); // tmd_offset >> 2
+    put_u32(&mut p, 0x2AC, cert_chain.len() as u32); // cert_chain_size
+    put_u32(&mut p, 0x2B0, (CERT_PART_OFF >> 2) as u32); // cert_chain_offset >> 2
+    put_u32(&mut p, 0x2B4, (H3_PART_OFF >> 2) as u32); // h3_table_offset >> 2
+    put_u32(&mut p, 0x2B8, (DATA_PART_OFF >> 2) as u32); // data_offset >> 2
     put_u32(
         &mut p,
-        ph + 0x2BC,
+        0x2BC,
         u32_field("partition data size", data_size >> 2)?,
     ); // data_size >> 2
-    let tmd_abs = ph + TMD_PART_OFF as usize;
+    let tmd_abs = TMD_PART_OFF as usize;
     p[tmd_abs..tmd_abs + tmd.len()].copy_from_slice(tmd);
     // Cert chain sits between the TMD and the H3 table (the vWii framework needs it to validate
     // the ticket/TMD; nod ignores it). CERT_PART_OFF is past the TMD and well before H3.
-    let cert_abs = ph + CERT_PART_OFF as usize;
+    let cert_abs = CERT_PART_OFF as usize;
     p[cert_abs..cert_abs + cert_chain.len()].copy_from_slice(cert_chain);
-    let h3_abs = ph + H3_PART_OFF as usize;
+    let h3_abs = H3_PART_OFF as usize;
     p[h3_abs..h3_abs + h3_table.len()].copy_from_slice(h3_table);
-
     Ok(p)
 }
 
@@ -563,15 +573,12 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    /// Build a disc prefix whose game id carries `region` as its 4th byte, with everything else
+    /// Build a disc header whose game id carries `region` as its 4th byte, with everything else
     /// held fixed.
     fn prefix_for(region: u8) -> Vec<u8> {
         let mut game_id = *b"GM2E8P";
         game_id[3] = region;
-        let ticket = build_wii_ticket(0x0005_0000_1234_5678);
-        let tmd = build_wii_tmd(0x0005_0000_1234_5678, 64 * SECTOR, &[0x11; 20]);
-        let h3 = vec![0u8; H3_TABLE_SIZE];
-        build_prefix(&game_id, "GC Test", &ticket, &tmd, &[], &h3, 64 * SECTOR).unwrap()
+        build_disc_header(&game_id, "GC Test")
     }
 
     /// The disc region-info field must follow the source game's region character — and nothing
