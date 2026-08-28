@@ -192,10 +192,17 @@ fn build_sys_blob(
     main_dol: &[u8],
     iso_size: u64,
 ) -> Result<(Vec<u8>, u64)> {
-    // boot.bin + bi2.bin (bi2 is all zero for our purposes).
+    // boot.bin + bi2.bin. A real Wii disc's *partition* boot.bin carries the Wii magic at 0x18
+    // (the same word as the outer disc header) and a non-zero country code in bi2; both are
+    // absent from a bare zero-filled blob. `nod` doesn't check either, but a real IOS/apploader
+    // treats a partition boot.bin without the magic as "not a Wii disc" and refuses to boot it.
     let mut sys = vec![0u8; APPLOADER_OFF];
     sys[0..6].copy_from_slice(game_id);
+    put_u32(&mut sys, 0x18, DISC_MAGIC_WII);
     write_title(&mut sys[0x20..0x20 + 0x40], disc_title);
+    // bi2.bin country code (bi2 offset 0x18): match the disc region so the game sees a valid
+    // country instead of 0. Same J/E/PAL/K mapping as the disc region info.
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x18, region_info_for(game_id[3]));
 
     // apploader, then 0x20-aligned main.dol, then 0x20-aligned FST.
     sys.extend_from_slice(apploader);
