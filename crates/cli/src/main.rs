@@ -113,7 +113,8 @@ struct Cli {
     #[arg(long)]
     gamecube: bool,
 
-    /// GameCube: Nintendont `boot.dol` to embed (default: downloaded, pinned build).
+    /// GameCube: Nintendont autoboot-forwarder `.dol` to use as the disc's main.dol
+    /// (default: downloaded, pinned FIX94 forwarder). Nintendont itself must be on the SD card.
     #[arg(long, value_name = "DOL")]
     nintendont: Option<PathBuf>,
 
