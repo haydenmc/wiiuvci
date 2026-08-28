@@ -61,6 +61,7 @@ const REGION_INFO_ABS: u64 = 0x4E000;
 // Partition-relative offsets.
 const TICKET_LEN: usize = 0x2A4;
 const TMD_PART_OFF: u64 = 0x2C0;
+const CERT_PART_OFF: u64 = 0x4E0; // cert chain: after the TMD, before H3 (matches retail discs)
 const H3_PART_OFF: u64 = 0x8000;
 const DATA_PART_OFF: u64 = 0x20000;
 const DATA_ABS: u64 = PART_ABS + DATA_PART_OFF; // 0x70000
@@ -319,6 +320,9 @@ pub struct GcDiscInputs<'a> {
     /// `nod`-validation builds (the apploader is hash-covered data `nod` never executes); a real
     /// apploader is only required to boot on hardware.
     pub apploader: &'a [u8],
+    /// The Wii certificate chain (Root-CA/CP/XS) written into the partition header. Needed on
+    /// hardware to validate the fakesigned ticket/TMD; may be empty for `nod`-validation builds.
+    pub cert_chain: &'a [u8],
 }
 
 /// Author a synthetic Wii disc booting Nintendont, with `iso` (`iso_size` bytes) embedded as
@@ -339,9 +343,16 @@ pub fn author_gc_disc(
         disc_title,
         main_dol,
         apploader,
+        cert_chain,
     } = *inputs;
     let title_id = wii_disc_title_id(&game_id);
     let ioerr = |e| Error::io(out_path, e);
+    if CERT_PART_OFF as usize + cert_chain.len() > H3_PART_OFF as usize {
+        return Err(Error::FormatLimit(format!(
+            "certificate chain ({} bytes) does not fit before the H3 table",
+            cert_chain.len()
+        )));
+    }
 
     if iso_size > MAX_ISO_SIZE {
         return Err(Error::FormatLimit(format!(
@@ -407,7 +418,9 @@ pub fn author_gc_disc(
 
     // Now build and write the 0x70000-byte prefix (disc header, partition table, partition
     // header) with the computed H3 table and TMD.
-    let prefix = build_prefix(&game_id, disc_title, &ticket, &tmd, &h3_table, data_size)?;
+    let prefix = build_prefix(
+        &game_id, disc_title, &ticket, &tmd, cert_chain, &h3_table, data_size,
+    )?;
     file.seek(SeekFrom::Start(0)).map_err(ioerr)?;
     file.write_all(&prefix).map_err(ioerr)?;
     file.flush().map_err(ioerr)?;
@@ -493,6 +506,7 @@ fn build_prefix(
     disc_title: &str,
     ticket: &[u8],
     tmd: &[u8],
+    cert_chain: &[u8],
     h3_table: &[u8],
     data_size: u64,
 ) -> Result<Vec<u8>> {
@@ -523,8 +537,8 @@ fn build_prefix(
     p[ph..ph + ticket.len()].copy_from_slice(ticket);
     put_u32(&mut p, ph + 0x2A4, tmd.len() as u32); // tmd_size
     put_u32(&mut p, ph + 0x2A8, (TMD_PART_OFF >> 2) as u32); // tmd_offset >> 2
-    put_u32(&mut p, ph + 0x2AC, 0); // cert_chain_size (none)
-    put_u32(&mut p, ph + 0x2B0, 0); // cert_chain_offset
+    put_u32(&mut p, ph + 0x2AC, cert_chain.len() as u32); // cert_chain_size
+    put_u32(&mut p, ph + 0x2B0, (CERT_PART_OFF >> 2) as u32); // cert_chain_offset >> 2
     put_u32(&mut p, ph + 0x2B4, (H3_PART_OFF >> 2) as u32); // h3_table_offset >> 2
     put_u32(&mut p, ph + 0x2B8, (DATA_PART_OFF >> 2) as u32); // data_offset >> 2
     put_u32(
@@ -534,6 +548,10 @@ fn build_prefix(
     ); // data_size >> 2
     let tmd_abs = ph + TMD_PART_OFF as usize;
     p[tmd_abs..tmd_abs + tmd.len()].copy_from_slice(tmd);
+    // Cert chain sits between the TMD and the H3 table (the vWii framework needs it to validate
+    // the ticket/TMD; nod ignores it). CERT_PART_OFF is past the TMD and well before H3.
+    let cert_abs = ph + CERT_PART_OFF as usize;
+    p[cert_abs..cert_abs + cert_chain.len()].copy_from_slice(cert_chain);
     let h3_abs = ph + H3_PART_OFF as usize;
     p[h3_abs..h3_abs + h3_table.len()].copy_from_slice(h3_table);
 
@@ -553,7 +571,7 @@ mod tests {
         let ticket = build_wii_ticket(0x0005_0000_1234_5678);
         let tmd = build_wii_tmd(0x0005_0000_1234_5678, 64 * SECTOR, &[0x11; 20]);
         let h3 = vec![0u8; H3_TABLE_SIZE];
-        build_prefix(&game_id, "GC Test", &ticket, &tmd, &h3, 64 * SECTOR).unwrap()
+        build_prefix(&game_id, "GC Test", &ticket, &tmd, &[], &h3, 64 * SECTOR).unwrap()
     }
 
     /// The disc region-info field must follow the source game's region character — and nothing
@@ -616,6 +634,7 @@ mod tests {
                 disc_title: "GC Test",
                 main_dol: &[0u8; 32],
                 apploader: &[],
+                cert_chain: &[],
             },
             &disc_path,
         );
@@ -667,7 +686,8 @@ mod tests {
                 game_id,
                 disc_title: "GC Test",
                 main_dol: &main_dol,
-                apploader: &[], // empty placeholder — nod never executes it
+                apploader: &[],
+                cert_chain: &[], // empty placeholder — nod never executes it
             },
             &disc_path,
         )
@@ -764,6 +784,7 @@ mod tests {
                 disc_title: "Super Monkey Ball 2",
                 main_dol: &main_dol,
                 apploader: &[],
+                cert_chain: &[],
             },
             &disc_path,
         )

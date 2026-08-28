@@ -60,14 +60,7 @@ fn parse_header(header: &[u8; HEADER_LEN]) -> Result<(usize, String, u32)> {
 /// near the front of the disc is read.
 pub(crate) fn extract_from_nfs(nfs_dir: &Path) -> Result<ApploaderImage> {
     let hif0 = nfs_dir.join("hif_000000.nfs");
-    let disc = nod::Disc::new_with_options(
-        &hif0,
-        &nod::OpenOptions {
-            rebuild_encryption: false,
-            validate_hashes: false,
-        },
-    )
-    .map_err(|e| Error::UnsupportedDisc(format!("opening base NFS {}: {e}", hif0.display())))?;
+    let disc = open_base_nfs(&hif0)?;
     let mut part = disc
         .open_partition_kind(nod::PartitionKind::Data)
         .map_err(|e| Error::UnsupportedDisc(format!("opening base NFS data partition: {e}")))?;
@@ -84,6 +77,59 @@ pub(crate) fn extract_from_nfs(nfs_dir: &Path) -> Result<ApploaderImage> {
         .map_err(ioerr)?;
     part.read_exact(&mut bytes).map_err(ioerr)?;
     Ok(ApploaderImage { bytes, date, entry })
+}
+
+fn open_base_nfs(hif0: &Path) -> Result<nod::Disc> {
+    nod::Disc::new_with_options(
+        hif0,
+        &nod::OpenOptions {
+            rebuild_encryption: false,
+            validate_hashes: false,
+        },
+    )
+    .map_err(|e| Error::UnsupportedDisc(format!("opening base NFS {}: {e}", hif0.display())))
+}
+
+fn be32(b: &[u8], o: usize) -> u32 {
+    u32::from_be_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+/// Read the Wii **certificate chain** (Root-CA00000001 / CP00000004 / XS00000003) from the base
+/// disc's data-partition header. The synthetic GameCube-carrier disc reuses it verbatim: the vWii
+/// framework needs the cert chain present to validate the disc's (fakesigned) ticket/TMD, and a
+/// GameCube source disc has none of its own. The chain is Nintendo's fixed public chain, identical
+/// on every retail Wii disc, so the base title's own game disc is a convenient source.
+pub(crate) fn extract_cert_chain_from_nfs(nfs_dir: &Path) -> Result<Vec<u8>> {
+    let hif0 = nfs_dir.join("hif_000000.nfs");
+    let mut disc = open_base_nfs(&hif0)?;
+    let ioerr = |e| Error::io(&hif0, e);
+
+    // Partition table @ 0x40000: partition-info offset (>>2) then the first partition's offset.
+    let mut pt = [0u8; 0x40];
+    disc.seek(SeekFrom::Start(0x40000)).map_err(ioerr)?;
+    disc.read_exact(&mut pt).map_err(ioerr)?;
+    let info_off = (be32(&pt, 4) as u64) << 2;
+    let mut ent = [0u8; 8];
+    disc.seek(SeekFrom::Start(info_off)).map_err(ioerr)?;
+    disc.read_exact(&mut ent).map_err(ioerr)?;
+    let part_off = (be32(&ent, 0) as u64) << 2;
+
+    // Partition header: cert-chain size @ +0x2AC, offset (>>2) @ +0x2B0.
+    let mut hdr = [0u8; 0x2C0];
+    disc.seek(SeekFrom::Start(part_off)).map_err(ioerr)?;
+    disc.read_exact(&mut hdr).map_err(ioerr)?;
+    let cert_size = be32(&hdr, 0x2AC) as usize;
+    let cert_off = (be32(&hdr, 0x2B0) as u64) << 2;
+    if cert_size == 0 || cert_size > 0x4000 {
+        return Err(Error::UnsupportedDisc(format!(
+            "base disc has no usable certificate chain (size {cert_size:#x})"
+        )));
+    }
+    let mut cert = vec![0u8; cert_size];
+    disc.seek(SeekFrom::Start(part_off + cert_off))
+        .map_err(ioerr)?;
+    disc.read_exact(&mut cert).map_err(ioerr)?;
+    Ok(cert)
 }
 
 #[cfg(test)]
@@ -192,6 +238,7 @@ mod tests {
                 disc_title: "GC Test",
                 main_dol: &main_dol,
                 apploader: &apploader,
+                cert_chain: &[],
             },
             &disc_path,
         )

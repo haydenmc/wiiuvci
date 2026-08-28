@@ -226,41 +226,57 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     let staged = config.base.stage(work_dir)?;
 
     // 2. Author the synthetic Wii disc (Nintendont as main.dol + the GameCube image as game.iso).
-    // Without --apploader, recover the genuine apploader from the base title's own game disc
-    // (the reference tools inherit it the same way, by rebuilding the base's disc).
-    if gc_opts.apploader.is_empty() {
+    // The synthetic disc needs two things a GameCube source disc can't provide but the base
+    // title's own Wii game disc can: the Wii certificate chain (always — the vWii framework needs
+    // it to validate the fakesigned ticket/TMD) and, unless --apploader was given, a real Wii
+    // apploader. Both come from the base's `content/hif_*.nfs`, materialized once here. The
+    // reference tools inherit both the same way, by rebuilding the base's own disc.
+    let mut cert_chain: Vec<u8> = Vec::new();
+    {
         let nfs_scratch = work_dir.join("base_nfs");
-        let extracted = config
-            .base
-            .materialize_original_nfs(&nfs_scratch)
-            .and_then(|dir| {
-                dir.map(|d| crate::apploader::extract_from_nfs(&d))
-                    .transpose()
-            });
-        // The materialized copy (up to a few hundred MB for archive/NUS bases) is only needed
-        // for the ~200 KiB read above.
-        let _ = std::fs::remove_dir_all(&nfs_scratch);
-        match extracted {
-            Ok(Some(app)) => {
-                log::info!(
-                    "using the apploader from the base title's own game disc \
-                     ({} bytes, {}, entry {:#010x})",
-                    app.bytes.len(),
-                    app.date,
-                    app.entry
-                );
-                gc_opts.apploader = app.bytes;
+        match config.base.materialize_original_nfs(&nfs_scratch) {
+            Ok(Some(dir)) => {
+                match crate::apploader::extract_cert_chain_from_nfs(&dir) {
+                    Ok(c) => {
+                        log::info!(
+                            "using the Wii cert chain from the base disc ({} bytes)",
+                            c.len()
+                        );
+                        cert_chain = c;
+                    }
+                    Err(e) => log::warn!(
+                        "no cert chain: reading it from the base disc failed ({e}) — the package \
+                         will validate but will NOT boot on hardware"
+                    ),
+                }
+                if gc_opts.apploader.is_empty() {
+                    match crate::apploader::extract_from_nfs(&dir) {
+                        Ok(app) => {
+                            log::info!(
+                                "using the apploader from the base title's own game disc \
+                                 ({} bytes, {}, entry {:#010x})",
+                                app.bytes.len(),
+                                app.date,
+                                app.entry
+                            );
+                            gc_opts.apploader = app.bytes;
+                        }
+                        Err(e) => log::warn!(
+                            "no apploader: extracting one from the base failed ({e}) — the \
+                             package will validate but will NOT boot on hardware (supply one \
+                             with --apploader)"
+                        ),
+                    }
+                }
             }
             Ok(None) => log::warn!(
-                "no apploader: the base has no original game data to take one from, and none \
-                 was supplied — the package will validate but will NOT boot on hardware \
-                 (supply one with --apploader)"
+                "the base has no original game disc to take the cert chain / apploader from — \
+                 the package will validate but will NOT boot on hardware"
             ),
-            Err(e) => log::warn!(
-                "no apploader: extracting one from the base failed ({e}) — the package will \
-                 validate but will NOT boot on hardware (supply one with --apploader)"
-            ),
+            Err(e) => log::warn!("could not read the base's original game disc ({e})"),
         }
+        // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
+        let _ = std::fs::remove_dir_all(&nfs_scratch);
     }
     let disc_title = config.title.clone().unwrap_or_else(|| game_id.clone());
     let disc_path = work_dir.join("gc_disc.img");
@@ -273,6 +289,7 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
         disc_title: &disc_title,
         main_dol: &gc_opts.nintendont_dol,
         apploader: &gc_opts.apploader,
+        cert_chain: &cert_chain,
     };
     let mut authored = wii_author::author_gc_disc(gc.iso_stream(), iso_size, &inputs, &disc_path)?;
 
