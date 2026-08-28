@@ -192,17 +192,26 @@ fn build_sys_blob(
     main_dol: &[u8],
     iso_size: u64,
 ) -> Result<(Vec<u8>, u64)> {
-    // boot.bin + bi2.bin. A real Wii disc's *partition* boot.bin carries the Wii magic at 0x18
-    // (the same word as the outer disc header) and a non-zero country code in bi2; both are
-    // absent from a bare zero-filled blob. `nod` doesn't check either, but a real IOS/apploader
-    // treats a partition boot.bin without the magic as "not a Wii disc" and refuses to boot it.
+    // boot.bin + bi2.bin. `nod` validates neither, so a bare zero-filled blob passes offline —
+    // but a real IOS/apploader reads these fields and a zeroed boot.bin fails to boot (most
+    // critically the "user position" at 0x430, the MEM1 address the apploader loads the FST to;
+    // zero there loads to address 0 and crashes). The non-layout fields below are set to the
+    // known-good values a TeconMoon GameCube inject uses for its synthetic carrier disc.
     let mut sys = vec![0u8; APPLOADER_OFF];
     sys[0..6].copy_from_slice(game_id);
-    put_u32(&mut sys, 0x18, DISC_MAGIC_WII);
+    put_u32(&mut sys, 0x18, DISC_MAGIC_WII); // partition boot.bin Wii magic
     write_title(&mut sys[0x20..0x20 + 0x40], disc_title);
-    // bi2.bin country code (bi2 offset 0x18): match the disc region so the game sees a valid
-    // country instead of 0. Same J/E/PAL/K mapping as the disc region info.
-    put_u32(&mut sys, BOOT_BIN_LEN + 0x18, region_info_for(game_id[3]));
+    put_u32(&mut sys, 0x60, 0x0101_0000); // "disable hash/encryption" boot flags
+    // FST load target in MEM1 and its reserved length; the apploader loads the FST here.
+    put_u32(&mut sys, 0x430, 0x803F_FF60); // user position (FST address)
+    put_u32(&mut sys, 0x434, 0x0006_0000); // user length
+    put_u32(&mut sys, 0x438, 0x0424_FFF8); // (matches the reference template)
+    // bi2.bin fields the reference sets (country at +0x18 stays 0, as in the reference).
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x1C, 0x0000_0001);
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x20, 0x0000_0001);
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x24, 0x0000_0005);
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x2C, 0x0400_0000);
+    put_u32(&mut sys, BOOT_BIN_LEN + 0x30, 0x7ED4_0000);
 
     // apploader, then 0x20-aligned main.dol, then 0x20-aligned FST.
     sys.extend_from_slice(apploader);
