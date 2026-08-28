@@ -75,13 +75,97 @@ pub const MEMPROT: BytePatch = BytePatch {
     all: false,
 };
 
+// Additional `fw.img` patches a *homebrew* (Nintendont) disc needs beyond fakesign/AHBPROT/
+// MEMPROT. A retail Wii inject boots without these, but a fakesigned homebrew carrier disc does
+// not — these neuter the remaining disc-interface / title-content verification in the vWii Wii-
+// mode firmware (two of them splice in a small code hook). Their exact IOS semantics aren't
+// documented here; the find/replace bytes are derived byte-for-byte from a known-good TeconMoon
+// GameCube inject (with these six added, our patched `fw.img` reproduces theirs exactly). Each
+// pattern is unique in the reference base `fw.img`; a base that lacks one skips it (no-op).
+pub const HB1: BytePatch = BytePatch {
+    name: "homebrew-1",
+    group: "homebrew-1",
+    find: &[
+        0x13, 0x8B, 0xB0, 0x68, 0xB5, 0x00, 0x28, 0x00, 0xD0, 0x03, 0x49, 0x02, 0x22, 0x09, 0xF0,
+        0x04, 0xFF, 0x1D, 0xBD, 0x00, 0x13, 0x8B, 0xA0, 0x04,
+    ],
+    at: 6,
+    write: &[
+        0xF0, 0x04, 0xFF, 0x21, 0x48, 0x02, 0x21, 0x09, 0xF0, 0x04, 0xFE, 0xF9,
+    ],
+    all: false,
+};
+pub const HB2: BytePatch = BytePatch {
+    name: "homebrew-2",
+    group: "homebrew-2",
+    find: &[
+        0x13, 0x8B, 0xB0, 0x20, 0x4B, 0x01, 0x68, 0x18, 0x47, 0x70, 0x00, 0x00, 0x13, 0x8B,
+    ],
+    at: 6,
+    write: &[0x20, 0x00],
+    all: false,
+};
+pub const HB3: BytePatch = BytePatch {
+    name: "homebrew-3",
+    group: "homebrew-3",
+    find: &[
+        0x1C, 0x28, 0x46, 0x69, 0x22, 0x09, 0xF0, 0x01, 0xFA, 0xB9, 0x20, 0x00, 0xE7, 0xBE, 0x78,
+        0x63,
+    ],
+    at: 6,
+    write: &[0xF7, 0xFC, 0xFB, 0x95],
+    all: false,
+};
+pub const HB4: BytePatch = BytePatch {
+    name: "homebrew-4",
+    group: "homebrew-4",
+    find: &[
+        0xF8, 0xF2, 0xF0, 0x00, 0xFF, 0x4E, 0x68, 0x4B, 0x2B, 0x06, 0xD1, 0x0C, 0x68, 0x8B, 0x2B,
+        0x00, 0xD1, 0x09, 0x68, 0xC8, 0x68, 0x42, 0x23, 0xA9, 0x00, 0x9B, 0x42, 0x9A, 0xD1, 0x03,
+        0x69, 0x02,
+    ],
+    at: 6,
+    write: &[
+        0x49, 0x01, 0x47, 0x88, 0x46, 0xC0, 0xE0, 0x01, 0x12, 0xFF, 0xFE, 0x00, 0x22, 0x00, 0x23,
+        0x01, 0x46, 0xC0, 0x46, 0xC0,
+    ],
+    all: false,
+};
+pub const HB5: BytePatch = BytePatch {
+    name: "homebrew-5",
+    group: "homebrew-5",
+    find: &[
+        0xFB, 0xF8, 0xFF, 0xFF, 0xFB, 0xF6, 0xB5, 0xF0, 0x46, 0x5F, 0x46, 0x56, 0x46, 0x4D, 0x46,
+        0x44, 0xB4, 0xF0, 0xB0, 0xBA, 0x1C, 0x0F, 0x1C, 0x15, 0x93, 0x18, 0x24, 0x00,
+    ],
+    at: 6,
+    write: &[
+        0xE5, 0x9F, 0x10, 0x04, 0xE5, 0x91, 0x00, 0x00, 0xE1, 0x2F, 0xFF, 0x10, 0x12, 0xFF, 0xFF,
+        0xE0,
+    ],
+    all: false,
+};
+pub const HB6: BytePatch = BytePatch {
+    name: "homebrew-6",
+    group: "homebrew-6",
+    find: &[
+        0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+    ],
+    at: 6,
+    write: &[0x03],
+    all: false,
+};
+
 /// The patch set for an ordinary (Wii) fakesigned title: both fakesign signature variants.
 /// Bases differ in which one they use — Rhythm Heaven Fever, for instance, uses the `20 07 4B 0B`
 /// variant — so we try both; a missing one is a no-op.
 pub const FAKESIGN_PATCHES: &[BytePatch] = &[FAKESIGN_A, FAKESIGN_B];
 
-/// The patch set for a homebrew-booting (Nintendont) title: fakesign + AHBPROT + MEMPROT.
-pub const HOMEBREW_PATCHES: &[BytePatch] = &[FAKESIGN_A, FAKESIGN_B, AHBPROT, MEMPROT];
+/// The patch set for a homebrew-booting (Nintendont) title: fakesign + AHBPROT + MEMPROT plus the
+/// six additional homebrew-disc verification patches ([`HB1`]–[`HB6`]).
+pub const HOMEBREW_PATCHES: &[BytePatch] = &[
+    FAKESIGN_A, FAKESIGN_B, AHBPROT, MEMPROT, HB1, HB2, HB3, HB4, HB5, HB6,
+];
 
 /// Apply `patches` to `data` in place, returning the names of the patches that matched. A patch
 /// whose signature is absent is skipped (and logged at `debug`); deciding what a *missing* patch
@@ -210,7 +294,17 @@ mod tests {
         // Each logical group is reported exactly once, not once per variant.
         assert_eq!(
             unmatched_groups(HOMEBREW_PATCHES, &applied),
-            vec!["fakesign", "AHBPROT", "MEMPROT"]
+            vec![
+                "fakesign",
+                "AHBPROT",
+                "MEMPROT",
+                "homebrew-1",
+                "homebrew-2",
+                "homebrew-3",
+                "homebrew-4",
+                "homebrew-5",
+                "homebrew-6",
+            ]
         );
     }
 
