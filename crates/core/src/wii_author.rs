@@ -575,11 +575,11 @@ fn fill_cluster_data(
         let e = end.min(iso_end);
         if s < e {
             iso.seek(SeekFrom::Start(s - iso_off))
-                .map_err(|err| Error::io("<game.iso>", err))?;
+                .map_err(|err| Error::read("the embedded game.iso", err))?;
             let doff = (s - start) as usize;
             let n = (e - s) as usize;
             iso.read_exact(&mut dst[doff..doff + n])
-                .map_err(|err| Error::io("<game.iso>", err))?;
+                .map_err(|err| Error::read("the embedded game.iso", err))?;
         }
     }
     Ok(())

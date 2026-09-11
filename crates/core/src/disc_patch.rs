@@ -21,23 +21,16 @@ use std::io::{Read, Seek, SeekFrom};
 
 use sha1::{Digest, Sha1};
 
-use crate::consts::{HASH_BLOCK, SECTORS_PER_GROUP, TMD_CONTENT0_HASH, WII_SIG};
+use crate::consts::{
+    CLUSTER_DATA_U64, H0_REGION, H1_OFF, H1_REGION, H2_OFF, H2_REGION, HASH_BLOCK, N_SUBBLOCKS,
+    SECTORS_PER_GROUP, SECTORS_PER_SUBGROUP, SUBBLOCK, TMD_CONTENT0_HASH, WII_SIG,
+};
 use crate::error::{Error, Result};
-use crate::input::SourceDisc;
+use crate::input::{SourceDisc, DISC_SECTOR_SIZE};
 use crate::video::{find_dol_edits, VideoPatches};
 
-const SECTOR: usize = 0x8000;
-const DATA: usize = SECTOR - HASH_BLOCK; // 0x7C00
-const SUBBLOCK: usize = 0x400;
-const N_SUBBLOCKS: usize = 31;
-const SECTORS_PER_SUBGROUP: usize = 8;
-
-// Sub-regions within a cluster's 0x400 hash block.
-const H0_REGION: usize = N_SUBBLOCKS * 20; // 0x26C
-const H1_OFF: usize = 0x280;
-const H1_REGION: usize = SECTORS_PER_SUBGROUP * 20; // 0xA0
-const H2_OFF: usize = 0x340;
-const H2_REGION: usize = 8 * 20; // 0xA0
+/// `u64` form of [`DISC_SECTOR_SIZE`]: absolute disc offsets below are all `u64`.
+const SECTOR_U64: u64 = DISC_SECTOR_SIZE as u64;
 
 /// Offset of the `h3_table_off` u32 (stored `>> 2`) within the partition header.
 const H3_TABLE_OFF_FIELD: u64 = 0x2B4;
@@ -117,10 +110,10 @@ pub struct DiscPlan {
 
 /// Recompute the H0/H1/H2 hash blocks of a full 64-cluster group in place and return its H3.
 ///
-/// `clusters` must be exactly [`SECTORS_PER_GROUP`] clusters of [`SECTOR`] bytes; clusters that
+/// `clusters` must be exactly [`SECTORS_PER_GROUP`] clusters of [`DISC_SECTOR_SIZE`] bytes; clusters that
 /// fall past the partition end should be passed zero-filled (matching `nod`'s zero-sector
 /// padding). A differently sized slice is a caller bug and returns an error.
-pub fn recompute_group(clusters: &mut [[u8; SECTOR]]) -> Result<[u8; 20]> {
+pub fn recompute_group(clusters: &mut [[u8; DISC_SECTOR_SIZE]]) -> Result<[u8; 20]> {
     if clusters.len() != SECTORS_PER_GROUP {
         return Err(Error::Other(anyhow::anyhow!(
             "hash group must be exactly {SECTORS_PER_GROUP} clusters, got {}",
@@ -183,12 +176,13 @@ pub(crate) fn h3_entry_mut(h3_table: &mut [u8], g: usize) -> Result<&mut [u8]> {
 
 fn read_at<R: Read + Seek>(disc: &mut R, offset: u64, out: &mut [u8]) -> Result<()> {
     disc.seek(SeekFrom::Start(offset))
-        .map_err(|e| Error::io("<disc>", e))?;
-    disc.read_exact(out).map_err(|e| Error::io("<disc>", e))?;
+        .map_err(|e| Error::read("the decrypted disc", e))?;
+    disc.read_exact(out)
+        .map_err(|e| Error::read("the decrypted disc", e))?;
     Ok(())
 }
 
-// Offsets within the partition header (at `start_sector * SECTOR`).
+// Offsets within the partition header (at `start_sector * DISC_SECTOR_SIZE`).
 const TMD_OFF_FIELD: u64 = 0x2A8; // u32, stored >> 2
 
 // The partition's own ticket sits at the partition start (offset 0); its signature shares the
@@ -253,7 +247,7 @@ pub fn plan_disc(
         }
     }
 
-    let part_base = span.start_sector as u64 * SECTOR as u64;
+    let part_base = span.start_sector as u64 * SECTOR_U64;
     let mut off_field = [0u8; 4];
     read_at(
         source.stream(),
@@ -276,20 +270,20 @@ pub fn plan_disc(
             if bytes.is_empty() {
                 continue;
             }
-            let first = off / DATA as u64;
-            let last = (off + bytes.len() as u64 - 1) / DATA as u64;
+            let first = off / CLUSTER_DATA_U64;
+            let last = (off + bytes.len() as u64 - 1) / CLUSTER_DATA_U64;
             for ps in first..=last {
                 groups.insert((ps / SECTORS_PER_GROUP as u64) as u32);
             }
         }
         for &g in &groups {
-            let mut clusters = vec![[0u8; SECTOR]; SECTORS_PER_GROUP];
+            let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
             for (k, cluster) in clusters.iter_mut().enumerate() {
                 let ps = g as u64 * SECTORS_PER_GROUP as u64 + k as u64;
                 if ps < total {
                     read_at(
                         source.stream(),
-                        (span.data_start_sector as u64 + ps) * SECTOR as u64,
+                        (span.data_start_sector as u64 + ps) * SECTOR_U64,
                         cluster,
                     )?;
                 }
@@ -352,19 +346,19 @@ pub fn plan_disc(
 
 /// Apply the edits that fall within group `g` to its 64 cluster buffers.
 pub(crate) fn apply_edits_to_group(
-    clusters: &mut [[u8; SECTOR]],
+    clusters: &mut [[u8; DISC_SECTOR_SIZE]],
     g: u32,
     edits: &[(u64, Vec<u8>)],
 ) {
     for (off, bytes) in edits {
         for (bi, &b) in bytes.iter().enumerate() {
             let l = off + bi as u64;
-            let ps = l / DATA as u64;
+            let ps = l / CLUSTER_DATA_U64;
             if (ps / SECTORS_PER_GROUP as u64) as u32 != g {
                 continue;
             }
             let k = (ps % SECTORS_PER_GROUP as u64) as usize;
-            let within = (l % DATA as u64) as usize;
+            let within = (l % CLUSTER_DATA_U64) as usize;
             clusters[k][HASH_BLOCK + within] = b;
         }
     }
@@ -376,7 +370,7 @@ mod tests {
 
     /// Independent re-implementation of `nod`'s per-sector hash verification, used to prove our
     /// recompute produces a self-consistent tree.
-    fn verify_group(clusters: &[[u8; SECTOR]], h3_table_entry: &[u8; 20]) {
+    fn verify_group(clusters: &[[u8; DISC_SECTOR_SIZE]], h3_table_entry: &[u8; 20]) {
         for (part_sector, cluster) in clusters.iter().enumerate() {
             let sector = part_sector % SECTORS_PER_SUBGROUP;
             let sub_group = (part_sector / SECTORS_PER_SUBGROUP) % SECTORS_PER_SUBGROUP;
@@ -401,8 +395,8 @@ mod tests {
         assert_eq!(&h3, h3_table_entry, "H3 mismatch");
     }
 
-    fn sample_group() -> Vec<[u8; SECTOR]> {
-        let mut clusters = vec![[0u8; SECTOR]; SECTORS_PER_GROUP];
+    fn sample_group() -> Vec<[u8; DISC_SECTOR_SIZE]> {
+        let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
         // Deterministic pseudo-data in the data region of each cluster.
         for (c, cluster) in clusters.iter_mut().enumerate() {
             for (idx, byte) in cluster[HASH_BLOCK..].iter_mut().enumerate() {
@@ -443,7 +437,7 @@ mod tests {
 
     #[test]
     fn wrong_sized_group_is_an_error_not_a_panic() {
-        let mut short = vec![[0u8; SECTOR]; SECTORS_PER_GROUP - 1];
+        let mut short = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP - 1];
         assert!(recompute_group(&mut short).is_err());
     }
 

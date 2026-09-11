@@ -15,14 +15,13 @@ use std::path::{Path, PathBuf};
 
 use nod::{Disc, OpenOptions, PartitionKind, SECTOR_SIZE};
 
+use crate::consts::{CLUSTER_DATA_U64, SECTORS_PER_GROUP_U64};
 use crate::error::{Error, Result};
 
-/// Logical (hash-stripped) bytes per disc cluster (must match [`crate::consts::CLUSTER_DATA`]).
-const LOG_CLUSTER: u64 = crate::consts::CLUSTER_DATA as u64;
-/// Clusters per Wii hash group.
-const GROUP_CLUSTERS: u64 = 64;
-/// Logical bytes covered by one hash group.
-const GROUP_BYTES: u64 = GROUP_CLUSTERS * LOG_CLUSTER;
+/// Logical (hash-stripped) bytes covered by one 64-cluster hash group. Derived rather than
+/// re-declared: [`crate::consts`] owns the layout numbers, and the `_U64` forms exist because
+/// every offset in this module is a `u64`.
+const GROUP_BYTES: u64 = SECTORS_PER_GROUP_U64 * CLUSTER_DATA_U64;
 
 /// Upper bound on the size of a `main.dol` we are willing to parse and buffer.
 ///
@@ -108,8 +107,8 @@ fn extent_groups(
              partition data region"
         )));
     };
-    let first = off / LOG_CLUSTER / GROUP_CLUSTERS;
-    let last = (end - 1) / LOG_CLUSTER / GROUP_CLUSTERS;
+    let first = off / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
+    let last = (end - 1) / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
     Ok(Some(first..=last))
 }
 
@@ -146,8 +145,8 @@ fn plan_group_runs(
     skip_gaps: bool,
     zero_extents: &[(u64, u64)],
 ) -> Result<Vec<(u32, u32)>> {
-    let ngroups = clusters.div_ceil(GROUP_CLUSTERS) as usize;
-    let data_size = clusters * LOG_CLUSTER;
+    let ngroups = clusters.div_ceil(SECTORS_PER_GROUP_U64) as usize;
+    let data_size = clusters * CLUSTER_DATA_U64;
     let mut used = vec![false; ngroups];
 
     for &(off, len) in extents {
@@ -402,7 +401,7 @@ impl SourceDisc {
     /// Logical (hash-stripped) byte size of the data partition's data region — the address space
     /// [`SourceDisc::open_data_partition`] reads span.
     fn data_region_size(&self) -> u64 {
-        self.data_region_clusters() * LOG_CLUSTER
+        self.data_region_clusters() * CLUSTER_DATA_U64
     }
 
     /// Open the data partition for logical (hash-stripped) reads.
@@ -430,7 +429,7 @@ impl SourceDisc {
     /// the DOL header's 18 sections. Both are in the partition's logical (hash-stripped) data
     /// address space, which [`crate::disc_patch`] maps back to physical clusters.
     pub fn read_main_dol(&self) -> Result<MainDol> {
-        let ioerr = |e| Error::io("<partition>", e);
+        let ioerr = |e| Error::read("the data partition", e);
         let mut part = self.disc.open_partition_kind(PartitionKind::Data)?;
 
         let mut boot = [0u8; 0x440];
@@ -497,7 +496,7 @@ impl SourceDisc {
         let data_size = self.data_region_size();
 
         let mut part = self.open_data_partition()?;
-        let ioerr = |e| Error::io("<partition>", e);
+        let ioerr = |e| Error::read("the data partition", e);
 
         // boot.bin: main.dol and FST offsets (all logical, stored >> 2).
         let mut boot = [0u8; 0x440];

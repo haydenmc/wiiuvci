@@ -3,8 +3,6 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::error::Result;
-
 use super::http_client;
 
 const WIITDB_URL: &str = "https://www.gametdb.com/wiitdb.txt?LANG=EN";
@@ -263,16 +261,9 @@ fn fetch_wiitdb_text() -> Option<String> {
 /// This is best-effort: any network failure yields `None` rather than an error — every failure
 /// is already `warn`ed inside [`fetch_wiitdb_text`], so there is nothing left for a caller to do
 /// with an `Err`.
-pub fn lookup_title_opt(game_id6: &str) -> Option<String> {
+pub fn lookup_title(game_id6: &str) -> Option<String> {
     let text = fetch_wiitdb_text()?;
     parse_wiitdb(&text, game_id6)
-}
-
-/// Thin `Result`-returning wrapper over [`lookup_title_opt`], kept only for existing callers.
-// TODO(C1): pipeline switches to *_opt
-#[doc(hidden)]
-pub fn lookup_title(game_id6: &str) -> Result<Option<String>> {
-    Ok(lookup_title_opt(game_id6))
 }
 
 #[cfg(test)]

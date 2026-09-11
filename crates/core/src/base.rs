@@ -37,6 +37,10 @@ pub const REQUIRED_CODE_FILES: &[&str] = &[
 pub struct StagedBase {
     /// The 16-byte NFS AES key read from `code/htk.bin`.
     pub htk: [u8; 16],
+    /// The build directory the three trees below live in — what [`crate::package::build_package`]
+    /// packages. Carried here so callers that already hold a `StagedBase` need not also thread the
+    /// work directory separately (the three paths are derived from it).
+    pub build_dir: PathBuf,
     /// Path to the staged `code/` directory.
     pub code_dir: PathBuf,
     /// Path to the staged `content/` directory.
@@ -120,6 +124,7 @@ pub(crate) fn finalize_stage(build_dir: &Path) -> Result<StagedBase> {
 
     Ok(StagedBase {
         htk,
+        build_dir: build_dir.to_path_buf(),
         code_dir,
         content_dir,
         meta_dir,

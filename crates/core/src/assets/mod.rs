@@ -9,8 +9,8 @@ pub mod gametdb;
 pub mod images;
 pub mod nintendont;
 
-pub use artrepo::{art_png_name, download_texture, download_texture_opt};
-pub use gametdb::{lookup_title, lookup_title_opt};
+pub use artrepo::{art_png_name, download_texture};
+pub use gametdb::lookup_title;
 pub use images::{png_to_tga, BootTexture};
 
 /// The shared connect timeout for every HTTP fetch this crate makes: distinguishes "server

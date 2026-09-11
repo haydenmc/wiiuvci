@@ -3,8 +3,6 @@
 
 use std::time::Duration;
 
-use crate::error::Result;
-
 use super::http_client;
 use super::images::BootTexture;
 
@@ -26,7 +24,7 @@ pub fn art_png_name(tex: BootTexture) -> Option<&'static str> {
 /// `system` (e.g. `"wii"`). Returns `None` if no repository art exists for this texture, on a
 /// 404, or on any network failure — every failure is already `warn`ed here, so there is nothing
 /// left for a caller to do with an `Err`.
-pub fn download_texture_opt(system: &str, game_id6: &str, tex: BootTexture) -> Option<Vec<u8>> {
+pub fn download_texture(system: &str, game_id6: &str, tex: BootTexture) -> Option<Vec<u8>> {
     let png_name = art_png_name(tex)?;
 
     let url = format!("{REPO_BASE}/{system}/{game_id6}/{png_name}");
@@ -59,14 +57,6 @@ pub fn download_texture_opt(system: &str, game_id6: &str, tex: BootTexture) -> O
             None
         }
     }
-}
-
-/// Thin `Result`-returning wrapper over [`download_texture_opt`], kept only for existing
-/// callers.
-// TODO(C1): pipeline switches to *_opt
-#[doc(hidden)]
-pub fn download_texture(system: &str, game_id6: &str, tex: BootTexture) -> Result<Option<Vec<u8>>> {
-    Ok(download_texture_opt(system, game_id6, tex))
 }
 
 #[cfg(test)]

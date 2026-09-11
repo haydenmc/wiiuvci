@@ -49,6 +49,20 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// An I/O error on a stream that has no path of its own (the decrypted disc, a partition, the
+    /// embedded GameCube image).
+    ///
+    /// Kept separate from [`Error::Io`] so those sites don't have to invent a pseudo-path
+    /// (`"<disc>"`) that renders as if a file by that name existed on disk.
+    #[error("I/O error reading {what}: {source}")]
+    Read {
+        /// What was being read, for the message (e.g. `"the decrypted disc"`).
+        what: &'static str,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Any other error.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -61,5 +75,10 @@ impl Error {
             path: path.into(),
             source,
         }
+    }
+
+    /// Wrap a [`std::io::Error`] that happened on a stream with no path — say what was being read.
+    pub fn read(what: &'static str, source: std::io::Error) -> Self {
+        Error::Read { what, source }
     }
 }

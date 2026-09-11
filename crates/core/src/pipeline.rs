@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::assets::images::{png_to_tga, BootTexture};
 use crate::assets::{artrepo, gametdb};
-use crate::base::BaseSource;
+use crate::base::{BaseSource, StagedBase};
 use crate::consts::{TMD_CONTENT0_HASH, WII_SIG};
 use crate::disc_patch;
 use crate::error::{Error, Result};
@@ -53,6 +53,41 @@ impl Region {
             Region::Japan => 1,
             Region::Usa => 2,
             Region::Europe => 4,
+        }
+    }
+}
+
+/// Which console the source game is for. Selects the community art-repository key and the
+/// `meta.xml` `drc_use` value; everything else in the packaging tail is platform-agnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    /// A Wii disc, injected as itself.
+    Wii,
+    /// A GameCube image, injected inside a synthetic Wii disc that boots Nintendont.
+    GameCube,
+}
+
+impl Platform {
+    /// The key the community art repository (UWUVCI-IMAGES) files a game's boot art under.
+    pub fn art_key(self) -> &'static str {
+        match self {
+            Platform::Wii => "wii",
+            Platform::GameCube => "gcn",
+        }
+    }
+
+    /// The `meta.xml` `drc_use` value for this platform. A Wii inject exposes the GamePad only as
+    /// a pointer (`1`), or not at all (`0`). A GameCube/Nintendont inject drives the emulated game
+    /// with the GamePad, so it must also set bit 16 (`0x10000`) — "GamePad usable as a controller
+    /// in vWii" — giving `0x10001` (and `1` when the GamePad is disabled). This mirrors the
+    /// reference injector, which writes `65537` for GameCube and `1` for Wii; without bit 16, vWii
+    /// never hands Nintendont the GamePad.
+    pub fn drc_use(self, gamepad: bool) -> u32 {
+        match (self, gamepad) {
+            (Platform::GameCube, true) => 0x0001_0001,
+            (Platform::GameCube, false) => 1,
+            (Platform::Wii, true) => 1,
+            (Platform::Wii, false) => 0,
         }
     }
 }
@@ -196,16 +231,9 @@ pub fn run(mut config: Config, work_dir: &Path) -> Result<Summary> {
     fwimg::patch_file(&staged.code_dir.join("fw.img"), fwimg::FAKESIGN_PATCHES)?;
 
     // 6-8. Metadata, boot textures, packaging (shared with the GameCube path).
-    finish_package(
-        &config,
-        work_dir,
-        &staged.code_dir,
-        &staged.meta_dir,
-        &ids,
-        game_id,
-        "wii",
-        |_package| Ok(()),
-    )
+    finish_package(&config, &staged, &ids, game_id, Platform::Wii, |_package| {
+        Ok(())
+    })
 }
 
 /// Run a GameCube injection: author a synthetic Wii disc that boots Nintendont (with the game as
@@ -228,59 +256,14 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     log::info!("staging base title");
     let staged = config.base.stage(work_dir)?;
 
-    // 2. Author the synthetic Wii disc (Nintendont as main.dol + the GameCube image as game.iso).
-    // The synthetic disc needs two things a GameCube source disc can't provide but the base
-    // title's own Wii game disc can: the Wii certificate chain (always — the vWii framework needs
-    // it to validate the fakesigned ticket/TMD) and, unless --apploader was given, a real Wii
-    // apploader. Both come from the base's `content/hif_*.nfs`, materialized once here. The
-    // reference tools inherit both the same way, by rebuilding the base's own disc.
-    let mut cert_chain: Vec<u8> = Vec::new();
-    {
-        let nfs_scratch = work_dir.join("base_nfs");
-        match config.base.materialize_original_nfs(&nfs_scratch) {
-            Ok(Some(dir)) => {
-                match crate::apploader::extract_cert_chain_from_nfs(&dir) {
-                    Ok(c) => {
-                        log::info!(
-                            "using the Wii cert chain from the base disc ({} bytes)",
-                            c.len()
-                        );
-                        cert_chain = c;
-                    }
-                    Err(e) => log::warn!(
-                        "no cert chain: reading it from the base disc failed ({e}) — the package \
-                         will validate but will NOT boot on hardware"
-                    ),
-                }
-                if gc_opts.apploader.is_empty() {
-                    match crate::apploader::extract_from_nfs(&dir) {
-                        Ok(app) => {
-                            log::info!(
-                                "using the apploader from the base title's own game disc \
-                                 ({} bytes, {}, entry {:#010x})",
-                                app.bytes.len(),
-                                app.date,
-                                app.entry
-                            );
-                            gc_opts.apploader = app.bytes;
-                        }
-                        Err(e) => log::warn!(
-                            "no apploader: extracting one from the base failed ({e}) — the \
-                             package will validate but will NOT boot on hardware (supply one \
-                             with --apploader)"
-                        ),
-                    }
-                }
-            }
-            Ok(None) => log::warn!(
-                "the base has no original game disc to take the cert chain / apploader from — \
-                 the package will validate but will NOT boot on hardware"
-            ),
-            Err(e) => log::warn!("could not read the base's original game disc ({e})"),
-        }
-        // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
-        let _ = std::fs::remove_dir_all(&nfs_scratch);
+    // 2. Borrow the Wii cert chain (and, unless --apploader was given, a real apploader) from the
+    // base title's own game disc; then author the synthetic Wii disc around them.
+    let extras = base_disc_extras(&mut *config.base, work_dir, gc_opts.apploader.is_empty());
+    if let Some(apploader) = extras.apploader {
+        gc_opts.apploader = apploader;
     }
+    let cert_chain = extras.cert_chain;
+
     let disc_title = gc_opts
         .disc_title
         .clone()
@@ -321,18 +304,7 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     // The synthetic disc image (a full-disc-size scratch file) is only needed to build the NFS;
     // remove it now instead of leaving it in work_dir alongside the NFS content, which would
     // otherwise roughly double peak scratch usage for the rest of the build.
-    match std::fs::metadata(&disc_path).and_then(|m| {
-        let len = m.len();
-        std::fs::remove_file(&disc_path).map(|()| len)
-    }) {
-        Ok(freed) => log::info!(
-            "removed scratch {} ({:.1} MiB freed)",
-            disc_path.display(),
-            freed as f64 / (1024.0 * 1024.0)
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Error::io(&disc_path, e)),
-    }
+    remove_scratch_file(&disc_path)?;
 
     // 4. Write the synthetic disc's Wii ticket/TMD as rvlt.tik / rvlt.tmd.
     let tik_path = staged.code_dir.join("rvlt.tik");
@@ -347,12 +319,10 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     // as the packaging hook below, after build_package but before the Summary is built.
     finish_package(
         &config,
-        work_dir,
-        &staged.code_dir,
-        &staged.meta_dir,
+        &staged,
         &ids,
         game_id,
-        "gcn",
+        Platform::GameCube,
         |_package| {
             // 9. Emit nincfg.bin next to the output package (it belongs at the SD-card root, not
             // in the WUP).
@@ -395,37 +365,126 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     )
 }
 
-/// The `meta.xml` `drc_use` value for a platform. A Wii inject exposes the GamePad only as a
-/// pointer (`1`), or not at all (`0`). A GameCube/Nintendont inject drives the emulated game with
-/// the GamePad, so it must also set bit 16 (`0x10000`) — "GamePad usable as a controller in vWii" —
-/// giving `0x10001` (and `1` when the GamePad is disabled). This mirrors the reference injector,
-/// which writes `65537` for GameCube and `1` for Wii; without bit 16, vWii never hands Nintendont
-/// the GamePad. `textures_key` is `"gcn"` on the GameCube path and `"wii"` on the Wii path.
-fn drc_use_value(textures_key: &str, gamepad: bool) -> u32 {
-    match (textures_key, gamepad) {
-        ("gcn", true) => 0x0001_0001,
-        ("gcn", false) => 1,
-        (_, true) => 1,
-        (_, false) => 0,
+/// What the GameCube path borrows from the base title's own Wii game disc (see
+/// [`base_disc_extras`]). Both fields are best-effort: an empty `cert_chain` or a `None`
+/// `apploader` means the package will validate but not boot on hardware.
+struct BaseDiscExtras {
+    /// The Wii certificate chain, or empty if it could not be read.
+    cert_chain: Vec<u8>,
+    /// A genuine Wii apploader, if one was wanted and could be extracted.
+    apploader: Option<Vec<u8>>,
+}
+
+/// Take from the base title's **original** game disc the two things a GameCube source disc can't
+/// provide: the Wii certificate chain (always — the vWii framework needs it to validate the
+/// fakesigned ticket/TMD) and, when `want_apploader`, a real Wii apploader. Both come from the
+/// base's `content/hif_*.nfs`, materialized once under `work_dir`. The reference tools inherit both
+/// the same way, by rebuilding the base's own disc.
+///
+/// Every failure is a warning rather than an error: the resulting package still builds and still
+/// validates, it just won't boot on hardware — and saying so once, loudly, is more useful than
+/// aborting a multi-GB build the user may well be running to inspect the rest of the output.
+fn base_disc_extras(
+    base: &mut dyn BaseSource,
+    work_dir: &Path,
+    want_apploader: bool,
+) -> BaseDiscExtras {
+    let mut extras = BaseDiscExtras {
+        cert_chain: Vec::new(),
+        apploader: None,
+    };
+    let nfs_scratch = work_dir.join("base_nfs");
+    match base.materialize_original_nfs(&nfs_scratch) {
+        Ok(Some(dir)) => {
+            match crate::apploader::extract_cert_chain_from_nfs(&dir) {
+                Ok(c) => {
+                    log::info!(
+                        "using the Wii cert chain from the base disc ({} bytes)",
+                        c.len()
+                    );
+                    extras.cert_chain = c;
+                }
+                Err(e) => log::warn!(
+                    "no cert chain: reading it from the base disc failed ({e}) — the package \
+                     will validate but will NOT boot on hardware"
+                ),
+            }
+            if want_apploader {
+                match crate::apploader::extract_from_nfs(&dir) {
+                    Ok(app) => {
+                        log::info!(
+                            "using the apploader from the base title's own game disc \
+                             ({} bytes, {}, entry {:#010x})",
+                            app.bytes.len(),
+                            app.date,
+                            app.entry
+                        );
+                        extras.apploader = Some(app.bytes);
+                    }
+                    Err(e) => log::warn!(
+                        "no apploader: extracting one from the base failed ({e}) — the \
+                         package will validate but will NOT boot on hardware (supply one \
+                         with --apploader)"
+                    ),
+                }
+            }
+        }
+        Ok(None) => log::warn!(
+            "the base has no original game disc to take the cert chain / apploader from — \
+             the package will validate but will NOT boot on hardware"
+        ),
+        Err(e) => log::warn!("could not read the base's original game disc ({e})"),
     }
+    // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
+    // A failure here is not fatal — the whole work_dir is temporary — but it is worth saying,
+    // since it leaves those hundreds of MB occupied for the rest of the build.
+    if let Err(e) = std::fs::remove_dir_all(&nfs_scratch) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "could not remove the scratch copy of the base disc at {} ({e})",
+                nfs_scratch.display()
+            );
+        }
+    }
+    extras
+}
+
+/// Delete a scratch file, reporting how much space it freed.
+///
+/// A file that is already gone is success (nothing to free); any other failure propagates, because
+/// the files this is used on are disc-sized and silently leaving one behind can fill the user's
+/// scratch volume mid-build.
+fn remove_scratch_file(path: &Path) -> Result<()> {
+    match std::fs::metadata(path).and_then(|m| {
+        let len = m.len();
+        std::fs::remove_file(path).map(|()| len)
+    }) {
+        Ok(freed) => log::info!(
+            "removed scratch {} ({:.1} MiB freed)",
+            path.display(),
+            freed as f64 / (1024.0 * 1024.0)
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(path, e)),
+    }
+    Ok(())
 }
 
 /// Shared tail of both injection paths: regenerate `app.xml`/`meta.xml`, resolve the boot
-/// textures, package the WUP, and build the `Summary`. `textures_key` selects the boot-art
-/// repository convention (`"wii"` vs `"gcn"`, see [`resolve_textures`]); `after_package` runs
-/// after `build_package` but before the `Summary` is built (the GameCube path uses it to emit
-/// `nincfg.bin`; the Wii path passes a no-op).
-#[allow(clippy::too_many_arguments)]
+/// textures, package the WUP, and build the `Summary`. `platform` selects the `drc_use` value and
+/// the boot-art repository key (see [`Platform`]); `after_package` runs after `build_package` but
+/// before the `Summary` is built (the GameCube path uses it to emit `nincfg.bin`; the Wii path
+/// passes a no-op).
 fn finish_package(
     config: &Config,
-    work_dir: &Path,
-    code_dir: &Path,
-    meta_dir: &Path,
+    staged: &StagedBase,
     ids: &titleid::TitleIds,
     game_id: String,
-    textures_key: &str,
+    platform: Platform,
     after_package: impl FnOnce(&PackageStats) -> Result<()>,
 ) -> Result<Summary> {
+    let (code_dir, meta_dir) = (staged.code_dir.as_path(), staged.meta_dir.as_path());
+
     // 6. Metadata: app.xml + meta.xml.
     std::fs::write(code_dir.join("app.xml"), appxml::generate(ids))
         .map_err(|e| Error::io(code_dir.join("app.xml"), e))?;
@@ -441,13 +500,13 @@ fn finish_package(
             short_name: &title,
             publisher: "",
             region: config.region.code(),
-            drc_use: drc_use_value(textures_key, config.gamepad),
+            drc_use: platform.drc_use(config.gamepad),
         },
     )?;
     std::fs::write(&meta_path, patched).map_err(|e| Error::io(&meta_path, e))?;
 
     // 7. Boot textures (icon / TV / DRC; UWUVCI-IMAGES keys GameCube art under "gcn").
-    resolve_textures(config, textures_key, &game_id, meta_dir)?;
+    resolve_textures(config, platform, &game_id, meta_dir)?;
 
     // 8. Package.
     log::info!("packaging WUP into {}", config.out.display());
@@ -458,7 +517,7 @@ fn finish_package(
         title_key: TITLE_KEY,
         cert: &config.cert,
     };
-    let package = build_package(work_dir, &config.out, &params)?;
+    let package = build_package(&staged.build_dir, &config.out, &params)?;
 
     after_package(&package)?;
 
@@ -471,13 +530,20 @@ fn finish_package(
     })
 }
 
+/// The title string written into `meta.xml`: `--title` if given, else GameTDB's name for the
+/// game, else the raw game id.
 fn resolve_title(config: &Config, game_id: &str) -> String {
     if let Some(t) = &config.title {
         return t.clone();
     }
     if config.online {
-        if let Ok(Some(name)) = gametdb::lookup_title(game_id) {
-            return name;
+        match gametdb::lookup_title(game_id) {
+            Some(name) => return name,
+            // `lookup_title` already warns about *why* it came up empty (network, cache); what it
+            // can't say is that this was the run's only chance at a real title, so the package is
+            // about to be named "RSPE01" on the Wii U menu. Someone who passed `--online` for the
+            // title needs to see that, not go looking for it in the finished meta.xml.
+            None => log::warn!("no GameTDB title for {game_id}; using the game id as the title"),
         }
     }
     game_id.to_string()
@@ -494,14 +560,19 @@ fn drc_source(drc: Option<Vec<u8>>, tv: &Option<Vec<u8>>) -> Option<Vec<u8>> {
 ///
 /// When no GamePad-specific art is found, the TV image is reused for `bootDrcTex` so both screens
 /// match (the community art repos usually only carry the TV image).
-fn resolve_textures(config: &Config, platform: &str, game_id: &str, meta_dir: &Path) -> Result<()> {
+fn resolve_textures(
+    config: &Config,
+    platform: Platform,
+    game_id: &str,
+    meta_dir: &Path,
+) -> Result<()> {
     // Resolve a texture's source PNG: an override path, else an online download, else None.
     let resolve_src =
         |tex: BootTexture, override_png: &Option<PathBuf>| -> Result<Option<Vec<u8>>> {
             if let Some(path) = override_png {
                 Ok(Some(std::fs::read(path).map_err(|e| Error::io(path, e))?))
             } else if config.online {
-                Ok(artrepo::download_texture(platform, game_id, tex).unwrap_or(None))
+                Ok(artrepo::download_texture(platform.art_key(), game_id, tex))
             } else {
                 Ok(None)
             }
@@ -513,14 +584,29 @@ fn resolve_textures(config: &Config, platform: &str, game_id: &str, meta_dir: &P
         log::info!("wrote {}", tex.filename());
         Ok(())
     };
+    // `download_texture` warns about *why* a fetch came up empty (404, network); what it can't say
+    // is which texture therefore keeps whatever art the base title shipped with — the visible
+    // outcome, and the one thing that isn't obvious from a successful build's output.
+    let kept_base_art = |tex: BootTexture| {
+        if config.online {
+            log::info!(
+                "no {} art for {game_id}; keeping the base title's",
+                tex.filename()
+            );
+        }
+    };
 
     if let Some(bytes) = resolve_src(BootTexture::Icon, &config.icon_png)? {
         write_tex(BootTexture::Icon, &bytes)?;
+    } else {
+        kept_base_art(BootTexture::Icon);
     }
 
     let tv = resolve_src(BootTexture::BootTv, &config.boot_tv_png)?;
     if let Some(bytes) = &tv {
         write_tex(BootTexture::BootTv, bytes)?;
+    } else {
+        kept_base_art(BootTexture::BootTv);
     }
 
     let drc_own = resolve_src(BootTexture::BootDrc, &config.boot_drc_png)?;
@@ -529,6 +615,8 @@ fn resolve_textures(config: &Config, platform: &str, game_id: &str, meta_dir: &P
     }
     if let Some(bytes) = drc_source(drc_own, &tv) {
         write_tex(BootTexture::BootDrc, &bytes)?;
+    } else {
+        kept_base_art(BootTexture::BootDrc);
     }
     Ok(())
 }
@@ -587,10 +675,33 @@ mod tests {
     fn drc_use_is_gamepad_controller_on_gamecube_only() {
         // GameCube drives the game with the GamePad, so it sets bit 16 (0x10001); Wii uses it only
         // as a pointer (1). Disabling the GamePad drops to 1 (GC) / 0 (Wii).
-        assert_eq!(drc_use_value("gcn", true), 0x0001_0001);
-        assert_eq!(drc_use_value("gcn", false), 1);
-        assert_eq!(drc_use_value("wii", true), 1);
-        assert_eq!(drc_use_value("wii", false), 0);
+        assert_eq!(Platform::GameCube.drc_use(true), 0x0001_0001);
+        assert_eq!(Platform::GameCube.drc_use(false), 1);
+        assert_eq!(Platform::Wii.drc_use(true), 1);
+        assert_eq!(Platform::Wii.drc_use(false), 0);
+    }
+
+    /// The art-repository keys are wire values: UWUVCI-IMAGES files GameCube art under "gcn", not
+    /// "gc" or "gamecube", and a typo here silently means "no art found" for every GC inject.
+    #[test]
+    fn art_key_matches_the_repository_layout() {
+        assert_eq!(Platform::Wii.art_key(), "wii");
+        assert_eq!(Platform::GameCube.art_key(), "gcn");
+    }
+
+    /// A scratch file that is already gone is not an error — the build has nothing left to free
+    /// and no reason to fail — but one that exists must actually be deleted.
+    #[test]
+    fn remove_scratch_file_deletes_and_tolerates_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gc_disc.img");
+        std::fs::write(&path, b"scratch").unwrap();
+
+        remove_scratch_file(&path).unwrap();
+        assert!(!path.exists(), "the scratch file should be gone");
+
+        // Second call: nothing to remove, still Ok.
+        remove_scratch_file(&path).unwrap();
     }
 
     /// The signature field ends at 0x104. A blob one byte short must be an error, not a silent

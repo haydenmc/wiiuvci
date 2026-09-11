@@ -15,7 +15,7 @@ pub mod split;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::consts::SECTORS_PER_GROUP;
+use crate::consts::{CLUSTER_DATA_U64, SECTORS_PER_GROUP, SECTORS_PER_GROUP_U64};
 use crate::disc_patch::{
     apply_edits_to_group, recompute_group, DiscPlan, PartitionPlan, StoredGroups,
 };
@@ -23,11 +23,6 @@ use crate::error::{Error, Result};
 use crate::input::{DecryptedDisc, DISC_SECTOR_SIZE};
 use eggs::{EggsHeader, LbaRange, MAX_RANGES};
 use split::SplitWriter;
-
-/// Bytes of file data per cluster: the 0x8000 cluster minus its 0x400 hash block (must match
-/// [`crate::consts::CLUSTER_DATA`]). [`PartitionPlan::edits`] are keyed by this logical data
-/// offset, unlike `disc_patches`/`header_patches`, which use absolute disc byte offsets.
-const DATA_PER_SECTOR: u64 = crate::consts::CLUSTER_DATA as u64;
 
 /// Outcome of an NFS build.
 #[derive(Debug, Clone)]
@@ -63,7 +58,7 @@ fn group_runs(pp: &PartitionPlan, index: usize) -> Result<Vec<GroupRun>> {
     let runs = match &pp.stored_data_groups {
         StoredGroups::All => {
             let total = (pp.data_end_sector - pp.data_start_sector) as u64;
-            let ngroups = total.div_ceil(SECTORS_PER_GROUP as u64) as u32;
+            let ngroups = total.div_ceil(SECTORS_PER_GROUP_U64) as u32;
             vec![GroupRun {
                 first_group: 0,
                 num_groups: ngroups,
@@ -229,7 +224,7 @@ fn plan_ranges(plan: &DiscPlan) -> Result<(Vec<LbaRange>, Vec<Vec<GroupRun>>)> {
         // A Wii inject stores exactly one partition, so all the mergeable gaps are in the first.
         if let Some(runs) = partition_runs.first_mut() {
             let extra = merge_smallest_gaps(runs, over);
-            let bytes = extra * SECTORS_PER_GROUP as u64 * DISC_SECTOR_SIZE as u64;
+            let bytes = extra * SECTORS_PER_GROUP_U64 * DISC_SECTOR_SIZE as u64;
             log::info!(
                 "NFS: {} LBA range(s) exceeds the EGGS cap of {MAX_RANGES}; merged the {over} \
                  smallest gap(s), storing {extra} extra hash group(s) ({:.1} MiB)",
@@ -383,14 +378,16 @@ fn verify_patches_contained(plan: &DiscPlan, partition_runs: &[Vec<GroupRun>]) -
             }
         }
 
-        // Edits: every hash group they touch must be one this partition stores.
+        // Edits: every hash group they touch must be one this partition stores. Their offsets
+        // are logical (hash-stripped) partition-data offsets — CLUSTER_DATA_U64 bytes per cluster
+        // — unlike `disc_patches`/`header_patches`, which use absolute disc byte offsets.
         for (off, bytes) in &pp.edits {
             if bytes.is_empty() {
                 continue;
             }
             let last_byte = off.saturating_add(bytes.len() as u64 - 1);
-            let first_group = off / DATA_PER_SECTOR / SECTORS_PER_GROUP as u64;
-            let last_group = last_byte / DATA_PER_SECTOR / SECTORS_PER_GROUP as u64;
+            let first_group = off / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
+            let last_group = last_byte / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
             for g in first_group..=last_group {
                 let stored = runs.iter().any(|r| {
                     g >= r.first_group as u64 && g < r.first_group as u64 + r.num_groups as u64
@@ -453,7 +450,7 @@ fn write_partition<R: Read + Seek + ?Sized>(
     for run in runs {
         for g in run.first_group..run.first_group + run.num_groups {
             for (k, cluster) in clusters.iter_mut().enumerate() {
-                let ps = g as u64 * SECTORS_PER_GROUP as u64 + k as u64;
+                let ps = g as u64 * SECTORS_PER_GROUP_U64 + k as u64;
                 if ps < total {
                     let off = (pp.data_start_sector as u64 + ps) * DISC_SECTOR_SIZE as u64;
                     read_sector(disc, off, disc_size, cluster)?;
@@ -468,7 +465,7 @@ fn write_partition<R: Read + Seek + ?Sized>(
             // zero-padded, but a retail disc's H3 for that group may have been computed over
             // whatever the mastering tool put there, so a disagreement would say nothing about our
             // rebuild. Every whole group is checked.
-            let last_sector = (g as u64 + 1) * SECTORS_PER_GROUP as u64 - 1;
+            let last_sector = (g as u64 + 1) * SECTORS_PER_GROUP_U64 - 1;
             if last_sector < total {
                 if let Some(matches) = h3_entry_matches(&pp.h3_table, g, &h3) {
                     check.record(g, matches);
@@ -476,7 +473,7 @@ fn write_partition<R: Read + Seek + ?Sized>(
             }
 
             for (k, cluster) in clusters.iter_mut().enumerate() {
-                let ps = g as u64 * SECTORS_PER_GROUP as u64 + k as u64;
+                let ps = g as u64 * SECTORS_PER_GROUP_U64 + k as u64;
                 if ps < total {
                     let s = pp.data_start_sector + ps as u32;
                     crypto::encrypt_sector(htk, s, cluster);
@@ -525,10 +522,10 @@ fn read_sector<R: Read + Seek + ?Sized>(
         return Ok(());
     }
     disc.seek(SeekFrom::Start(offset))
-        .map_err(|e| Error::io("<disc>", e))?;
+        .map_err(|e| Error::read("the decrypted disc", e))?;
     let to_read = ((disc_size - offset) as usize).min(out.len());
     disc.read_exact(&mut out[..to_read])
-        .map_err(|e| Error::io("<disc>", e))?;
+        .map_err(|e| Error::read("the decrypted disc", e))?;
     Ok(())
 }
 
@@ -761,7 +758,7 @@ mod tests {
     fn verify_rejects_edit_in_an_unstored_group() {
         // Groups 0 and 3 are stored; the edit lands in group 2.
         let mut pp = test_partition(StoredGroups::Runs(vec![(0, 1), (3, 1)]));
-        let off = 2 * SECTORS_PER_GROUP as u64 * DATA_PER_SECTOR;
+        let off = 2 * SECTORS_PER_GROUP_U64 * CLUSTER_DATA_U64;
         pp.edits = vec![(off, vec![0xAA; 4])];
         let err = check(&test_plan(pp, Vec::new())).unwrap_err().to_string();
         assert!(err.contains("hash group 2"), "{err}");
@@ -771,7 +768,7 @@ mod tests {
     fn verify_rejects_edit_spilling_out_of_a_stored_group() {
         // Only group 0 is stored; the edit starts in its last data byte and spills into group 1.
         let mut pp = test_partition(StoredGroups::Runs(vec![(0, 1)]));
-        let group_data = SECTORS_PER_GROUP as u64 * DATA_PER_SECTOR;
+        let group_data = SECTORS_PER_GROUP_U64 * CLUSTER_DATA_U64;
         pp.edits = vec![(group_data - 1, vec![0xAA; 2])];
         let err = check(&test_plan(pp, Vec::new())).unwrap_err().to_string();
         assert!(err.contains("hash group 1"), "{err}");
@@ -781,7 +778,7 @@ mod tests {
     fn verify_accepts_any_edit_when_the_plan_stores_every_group() {
         // `StoredGroups::All` is the store-everything case (synthetic GC disc).
         let mut pp = test_partition(StoredGroups::All);
-        let off = 3 * SECTORS_PER_GROUP as u64 * DATA_PER_SECTOR;
+        let off = 3 * SECTORS_PER_GROUP_U64 * CLUSTER_DATA_U64;
         pp.edits = vec![(off, vec![0xAA; 4])];
         check(&test_plan(pp, Vec::new())).unwrap();
     }
