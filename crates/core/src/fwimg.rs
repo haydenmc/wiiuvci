@@ -153,7 +153,10 @@ pub const NINTENDONT_2: BytePatch = BytePatch {
     ],
     all: false,
 };
-/// Nintendont input patch #3: flips the byte after the `0D 80 00 00` marker (`02` → `03`).
+/// Nintendont input patch #3: within the 13-byte signature
+/// `00 00 0F 00 00 00 02 00 00 00 00 FF FF`, flips the `02` at offset +6 to `03`. (The marker in
+/// the upstream `nfs2iso2nfs` description is not part of the pattern we match — only these 13
+/// bytes are.)
 pub const NINTENDONT_3: BytePatch = BytePatch {
     name: "nintendont-3",
     group: "nintendont-3",
@@ -189,14 +192,33 @@ pub const HOMEBREW_PATCHES: &[BytePatch] = &[
 /// Apply `patches` to `data` in place, returning the names of the patches that matched. A patch
 /// whose signature is absent is skipped (and logged at `debug`); deciding what a *missing* patch
 /// means is left to the caller / [`unmatched_groups`], since alternatives share a group.
+///
+/// A patch is expected to write **inside** the region it matched (`at + write.len() <=
+/// find.len()`), which every patch in this module satisfies (asserted by a test). A patch that
+/// wrote past its match could still run off the end of `data` when it matched near EOF, so the
+/// write is bounds-checked at runtime too: `fw.img` comes from a downloaded/user-supplied base,
+/// and an out-of-bounds slice there would be a panic, not a diagnosis.
 pub fn apply_patches(data: &mut [u8], patches: &[BytePatch]) -> Vec<&'static str> {
     let mut applied = Vec::new();
     for p in patches {
+        debug_assert!(
+            p.at + p.write.len() <= p.find.len(),
+            "patch '{}' writes outside the region it matches",
+            p.name
+        );
         let mut hits = 0usize;
         let mut i = 0usize;
         while i + p.find.len() <= data.len() {
             if &data[i..i + p.find.len()] == p.find {
                 let dst = i + p.at;
+                if dst + p.write.len() > data.len() {
+                    log::warn!(
+                        "fw.img: patch '{}' matched at 0x{i:X} but its write would run past the \
+                         end of the image; skipped",
+                        p.name
+                    );
+                    break;
+                }
                 data[dst..dst + p.write.len()].copy_from_slice(p.write);
                 hits += 1;
                 if !p.all {
@@ -351,6 +373,51 @@ mod tests {
         assert!(
             unmatched_groups(FAKESIGN_PATCHES, &applied).is_empty(),
             "the fakesign group must be satisfied on a real base"
+        );
+    }
+
+    /// Every shipped patch writes inside the region it matched. This is what makes the write
+    /// trivially in-bounds for a match anywhere in the image; the runtime guard in
+    /// [`apply_patches`] only has to cover a future patch that breaks this.
+    #[test]
+    fn every_patch_writes_inside_its_own_match() {
+        for p in HOMEBREW_PATCHES.iter().chain(FAKESIGN_PATCHES) {
+            assert!(
+                p.at + p.write.len() <= p.find.len(),
+                "patch '{}' writes {} bytes at +{} of a {}-byte signature",
+                p.name,
+                p.write.len(),
+                p.at,
+                p.find.len()
+            );
+        }
+    }
+
+    /// A (hypothetical) patch that writes past the end of its match must not panic when it
+    /// matches at the very end of the image — the write is skipped and nothing is corrupted.
+    ///
+    /// Only meaningful with `debug_assertions` off (in a debug build the `debug_assert!` in
+    /// [`apply_patches`] rejects such a patch outright, which is the point of having it), which is
+    /// how the gates run these tests (`cargo test --release`).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn write_past_the_end_of_the_image_is_skipped_not_panicking() {
+        const OVERRUN: BytePatch = BytePatch {
+            name: "overrun",
+            group: "overrun",
+            find: &[0xDE, 0xAD],
+            at: 2, // one past the match: lands outside `data` when the match is last
+            write: &[0xBE, 0xEF],
+            all: false,
+        };
+        let mut data = vec![0u8; 8];
+        data[6..8].copy_from_slice(&[0xDE, 0xAD]);
+        let applied = apply_patches(&mut data, &[OVERRUN]);
+        assert!(applied.is_empty(), "an unwritable match must not count");
+        assert_eq!(
+            data,
+            vec![0, 0, 0, 0, 0, 0, 0xDE, 0xAD],
+            "no bytes may change when the write would run past the end"
         );
     }
 

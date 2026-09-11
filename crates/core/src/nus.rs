@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -39,8 +40,14 @@ impl NusClient {
 
     /// Create a client with a custom base URL (e.g. a mirror).
     pub fn with_base_url(base_url: impl Into<String>) -> Result<Self> {
+        // Timeout semantics matter here: a base title's largest `.app` runs to hundreds of MB,
+        // which can legitimately take far longer than any fixed deadline on a slow link. See
+        // [`NusClient::get`] — the body is streamed through `Read`, where reqwest applies
+        // `timeout` *per read* (a stall timeout) rather than as a whole-request deadline, so a
+        // slow-but-progressing download is never cut off while a dead connection still fails.
         let http = reqwest::blocking::Client::builder()
             .user_agent("wiivci")
+            .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(120))
             .build()
             .map_err(|e| Error::Other(anyhow::anyhow!("building HTTP client: {e}")))?;
@@ -52,7 +59,7 @@ impl NusClient {
 
     fn get(&self, title_id: u64, file: &str) -> Result<Vec<u8>> {
         let url = format!("{}/{:016x}/{}", self.base_url, title_id, file);
-        let resp = self
+        let mut resp = self
             .http
             .get(&url)
             .send()
@@ -63,10 +70,15 @@ impl NusClient {
                 resp.status()
             )));
         }
-        let bytes = resp
-            .bytes()
+        // Stream the body via `Read` rather than `Response::bytes()`: `bytes()` runs the whole
+        // body download under the client's single `timeout`, so any content that takes longer
+        // than that in total fails even while data is flowing. `Read::read` applies the same
+        // timeout to each individual read instead, which is the stall semantics we want (see
+        // [`NusClient::with_base_url`]).
+        let mut bytes = Vec::new();
+        resp.read_to_end(&mut bytes)
             .map_err(|e| Error::Other(anyhow::anyhow!("reading {url}: {e}")))?;
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     /// Download the latest TMD (or a specific `version`).

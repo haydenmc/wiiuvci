@@ -68,6 +68,23 @@ fn group_runs(pp: &PartitionPlan) -> Vec<GroupRun> {
         .collect()
 }
 
+/// The EGGS range describing the sectors [`write_partition`] writes for one stored group run.
+///
+/// Both ends are clamped to the partition's data region: the final hash group may be partial, and
+/// the range must cover exactly the sectors written, no more. Clamping only the end would let a
+/// run starting at or past the partition end yield `last < first`, wrapping the `u32`
+/// `num_sectors` to near 4 billion — a header advertising multi-terabyte data that is not there.
+/// Such a run writes nothing, so it is described as the empty range it is.
+fn run_range(pp: &PartitionPlan, run: &GroupRun) -> LbaRange {
+    let total = pp.data_end_sector - pp.data_start_sector;
+    let first = (run.first_group * SECTORS_PER_GROUP as u32).min(total);
+    let last = ((run.first_group + run.num_groups) * SECTORS_PER_GROUP as u32).min(total);
+    LbaRange {
+        start_sector: pp.data_start_sector + first,
+        num_sectors: last - first,
+    }
+}
+
 /// The disc-level ranges present in every inject: the disc header and the partition table/region
 /// info sectors.
 fn disc_header_ranges() -> Vec<LbaRange> {
@@ -114,18 +131,8 @@ pub fn build_nfs<D: DecryptedDisc + ?Sized>(
             start_sector: pp.start_sector,
             num_sectors: pp.data_start_sector - pp.start_sector,
         });
-        let total = pp.data_end_sector - pp.data_start_sector;
         let runs = group_runs(pp);
-        for run in &runs {
-            // Clamp to the partition end — the final hash group may be partial, and the EGGS range
-            // must cover exactly the sectors written, no more.
-            let first = run.first_group * SECTORS_PER_GROUP as u32;
-            let last = ((run.first_group + run.num_groups) * SECTORS_PER_GROUP as u32).min(total);
-            ranges.push(LbaRange {
-                start_sector: pp.data_start_sector + first,
-                num_sectors: last - first,
-            });
-        }
+        ranges.extend(runs.iter().map(|run| run_range(pp, run)));
         partition_runs.push(runs);
     }
 
@@ -449,6 +456,38 @@ mod tests {
         // Verbatim, including a run whose last group runs past `data_end_sector`; build_nfs
         // clamps the *EGGS range* to the partition end rather than the run itself.
         assert_eq!(pairs, vec![(0, 1), (3, 2)]);
+    }
+
+    // ---- run_range ------------------------------------------------------------------------
+
+    #[test]
+    fn run_range_clamps_a_partial_tail_group_to_the_partition_end() {
+        let mut pp = test_partition(vec![(0, 3)]);
+        // Two full groups plus a one-sector tail: the third group is only partially present.
+        pp.data_end_sector = pp.data_start_sector + 2 * SECTORS_PER_GROUP as u32 + 1;
+        let runs = group_runs(&pp);
+        let r = run_range(&pp, &runs[0]);
+        assert_eq!(r.start_sector, pp.data_start_sector);
+        assert_eq!(r.num_sectors, 2 * SECTORS_PER_GROUP as u32 + 1);
+    }
+
+    /// A run that begins at or past the partition end writes no sectors. Clamping only the range's
+    /// end would give `last < first` and wrap `num_sectors` to ~4 billion, so the header would
+    /// claim terabytes of data the files do not contain.
+    #[test]
+    fn run_range_does_not_wrap_for_a_run_starting_past_the_partition_end() {
+        // The partition holds 4 groups; ask for runs starting at group 4 (exactly at the end) and
+        // group 9 (well past it).
+        for first_group in [4u32, 9] {
+            let pp = test_partition(vec![(first_group, 2)]);
+            let runs = group_runs(&pp);
+            let r = run_range(&pp, &runs[0]);
+            assert_eq!(
+                r.num_sectors, 0,
+                "a run starting at group {first_group} stores nothing"
+            );
+            assert_eq!(r.start_sector, pp.data_end_sector);
+        }
     }
 
     // ---- verify_patches_contained ---------------------------------------------------------

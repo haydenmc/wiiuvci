@@ -68,6 +68,21 @@ pub struct FstNode {
     pub cluster: u16,
 }
 
+/// The exact byte length [`Fst::serialize`] produces for an FST with `content_count` contents and
+/// `nodes` entries, without building it.
+///
+/// The serialized size depends only on the *shape* of the FST — never on any field's value — so
+/// this can be computed before the content table is filled in: a fixed 0x20-byte header, 0x20 per
+/// content descriptor, 0x10 per entry, and one NUL-terminated name per entry.
+///
+/// This exists because content 0 (the FST) needs its own size in the content table it contains,
+/// which is a circular dependency the packer can only break by computing the length up front.
+pub fn serialized_len(content_count: usize, nodes: &[FstNode]) -> usize {
+    0x20 + 0x20 * content_count
+        + 0x10 * nodes.len()
+        + nodes.iter().map(|n| n.name.len() + 1).sum::<usize>()
+}
+
 /// A complete FST ready to serialize.
 #[derive(Clone, Debug)]
 pub struct Fst {
@@ -80,6 +95,11 @@ pub struct Fst {
 }
 
 impl Fst {
+    /// The byte length [`Fst::serialize`] would produce for this FST — see [`serialized_len`].
+    pub fn serialized_len(&self) -> usize {
+        serialized_len(self.contents.len(), &self.nodes)
+    }
+
     /// Serialize the FST to its on-disk byte form.
     pub fn serialize(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -244,9 +264,9 @@ mod tests {
             .join("../../.dev/wup_ref/fst_decrypted.bin")
     }
 
-    #[test]
-    fn round_trips_a_small_fst() {
-        let fst = Fst {
+    /// A small but complete FST: two contents, a root, a directory and a file.
+    fn small_fst() -> Fst {
+        Fst {
             offset_factor: OFFSET_FACTOR,
             contents: vec![
                 FstContent {
@@ -296,11 +316,36 @@ mod tests {
                     cluster: 1,
                 },
             ],
-        };
+        }
+    }
+
+    #[test]
+    fn round_trips_a_small_fst() {
+        let fst = small_fst();
         let bytes = fst.serialize();
         let parsed = Fst::parse(&bytes).unwrap();
         assert_eq!(parsed.serialize(), bytes);
         assert_eq!(parsed.nodes[2].name, "meta.xml");
+    }
+
+    /// `serialized_len` must predict `serialize`'s output length exactly — the packer sizes
+    /// content 0 from it *before* the bytes exist, so any drift silently mis-sizes the FST
+    /// content.
+    #[test]
+    fn serialized_len_matches_serialize() {
+        let fst = small_fst();
+        assert_eq!(fst.serialized_len(), fst.serialize().len());
+        assert_eq!(
+            serialized_len(fst.contents.len(), &fst.nodes),
+            fst.serialize().len()
+        );
+
+        // Changing a *value* (not the shape) must not change the predicted length.
+        let mut fst2 = small_fst();
+        fst2.contents[0].size_sectors = 0xFFFF_FFFF;
+        fst2.contents[1].offset_sectors = 0x1234_5678;
+        assert_eq!(fst2.serialized_len(), fst.serialized_len());
+        assert_eq!(fst2.serialize().len(), fst.serialize().len());
     }
 
     /// Parse a retail title's decrypted FST and confirm our serializer reproduces it exactly
@@ -340,6 +385,24 @@ mod tests {
             data[ours.len()..].iter().all(|&b| b == 0),
             "trailing bytes should be padding"
         );
+
+        // Content 0 *is* this FST, so its recorded size must be the FST's own length rounded up
+        // to whole 0x8000 sectors — the value our packer now computes up front via
+        // `serialized_len` rather than after the fact.
+        assert_eq!(
+            fst.contents[0].size_sectors as usize,
+            ours.len().div_ceil(0x8000),
+            "content 0 must be sized from the FST's own length"
+        );
+        // And the content table is cumulative: each content starts where the previous one ended.
+        for i in 1..fst.contents.len() {
+            assert_eq!(
+                fst.contents[i].offset_sectors,
+                fst.contents[i - 1].offset_sectors + fst.contents[i - 1].size_sectors,
+                "content {i} must start where content {} ends",
+                i - 1
+            );
+        }
     }
 
     // --- Hostile-input bounds checks ---------------------------------------------------

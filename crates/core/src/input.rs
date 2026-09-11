@@ -252,6 +252,31 @@ pub struct PartitionSpan {
     pub data_end_sector: u32,
 }
 
+impl PartitionSpan {
+    /// Check that the span is ordered: `start_sector <= data_start_sector <= data_end_sector`.
+    ///
+    /// These three numbers come straight out of `nod`'s partition table, i.e. out of the source
+    /// image, and are subtracted from one another in several hot paths — the header sector count
+    /// (`data_start - start`), the data-region cluster count (`data_end - data_start`) — in
+    /// [`crate::disc_patch`] and [`crate::nfs`]. As `u32` arithmetic those subtractions wrap on a
+    /// malformed disc, turning a nonsense partition table into a multi-terabyte write (release)
+    /// or a subtract-overflow panic (debug). Validating the span once, where it is constructed,
+    /// makes every later subtraction sound without scattering checked arithmetic through the
+    /// encoder.
+    pub fn validate(&self) -> Result<()> {
+        if self.start_sector > self.data_start_sector
+            || self.data_start_sector > self.data_end_sector
+        {
+            return Err(Error::UnsupportedDisc(format!(
+                "partition {} has a malformed sector span: start {}, data start {}, data end {} \
+                 (expected start <= data start <= data end)",
+                self.index, self.start_sector, self.data_start_sector, self.data_end_sector
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl SourceDisc {
     /// Open a Wii disc image in decrypted mode.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -282,6 +307,10 @@ impl SourceDisc {
             data_end_sector: p.data_end_sector,
         };
         let mut partitions: Vec<PartitionSpan> = disc.partitions().iter().map(span_of).collect();
+        // Validate before anything subtracts these sector numbers (see `PartitionSpan::validate`).
+        for p in &partitions {
+            p.validate()?;
+        }
         partitions.sort_by_key(|p| p.start_sector);
         let data_partition = disc
             .partitions()
@@ -665,6 +694,41 @@ impl GcImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn span(start: u32, data_start: u32, data_end: u32) -> PartitionSpan {
+        PartitionSpan {
+            index: 0,
+            start_sector: start,
+            data_start_sector: data_start,
+            data_end_sector: data_end,
+        }
+    }
+
+    /// An ordered span is accepted, including the degenerate cases (an empty header region or an
+    /// empty data region) — those are odd but arithmetically sound.
+    #[test]
+    fn validate_accepts_ordered_spans() {
+        span(10, 14, 100).validate().unwrap();
+        span(10, 10, 10).validate().unwrap();
+        span(0, 0, 1).validate().unwrap();
+    }
+
+    /// Out-of-order sectors are what would wrap the `u32` subtractions downstream, so they must be
+    /// rejected at construction with an error naming the sectors.
+    #[test]
+    fn validate_rejects_out_of_order_spans() {
+        for bad in [span(14, 10, 100), span(10, 101, 100), span(200, 14, 100)] {
+            let err = bad.validate().unwrap_err();
+            assert!(
+                matches!(err, Error::UnsupportedDisc(_)),
+                "expected an unsupported-disc error, got {err}"
+            );
+            let msg = err.to_string();
+            for n in [bad.start_sector, bad.data_start_sector, bad.data_end_sector] {
+                assert!(msg.contains(&n.to_string()), "error should name {n}: {msg}");
+            }
+        }
+    }
 
     /// Verify GameCube ingestion against a real image: probe reports GameCube, the game id and
     /// logical size are sane, and the first bytes are the game id (GameCube images have no magic

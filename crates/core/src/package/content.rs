@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::util::align_up;
 
-use super::fst::{Fst, FstContent, FstNode, FstNodeKind, OFFSET_FACTOR};
+use super::fst::{self, Fst, FstContent, FstNode, FstNodeKind, OFFSET_FACTOR};
 
 /// TMD/FST content type for non-hashed content.
 pub const TYPE_NONHASHED: u16 = 0x2001;
@@ -377,6 +377,15 @@ pub fn plan(build_dir: &Path, title_id: u64) -> Result<PackagePlan> {
     let game_owner_title_id = 0x0005_0000_0000_0000 | (title_id & 0xFFFF_FFFF);
     let game_group_id = (title_id & 0xFFFF) as u32;
 
+    // Content 0 is the FST itself, so its size must be known before the content table (which the
+    // FST contains) can be built. `fst::serialized_len` breaks that circularity: the serialized
+    // length depends only on the FST's shape — the content count and the node list, both final by
+    // now — never on any field's value. Reading `contents[0].data_len` here instead would read the
+    // 0 it was initialized with and round it up to a single sector, which happens to be right only
+    // while the FST stays under 0x8000 bytes (every real one does today, hence no byte change —
+    // but a large enough title would have been mis-sized, overlapping content 1).
+    contents[0].data_len = fst::serialized_len(contents.len(), &nodes) as u64;
+
     // Compute FST secondary headers (cumulative content offsets in sectors).
     let mut fst_contents = Vec::with_capacity(contents.len());
     let mut cursor_sectors: u32 = 0;
@@ -406,8 +415,8 @@ pub fn plan(build_dir: &Path, title_id: u64) -> Result<PackagePlan> {
         nodes,
     };
     let fst_bytes = fst.serialize();
-    // Record the FST content's own data length.
-    contents[0].data_len = fst_bytes.len() as u64;
+    // The size stamped into the content table above must be exactly what serializing produced.
+    debug_assert_eq!(fst_bytes.len() as u64, contents[0].data_len);
 
     Ok(PackagePlan {
         fst: fst_bytes,
@@ -613,6 +622,89 @@ mod tests {
             "each code file gets its own content"
         );
         assert_ne!(app.cluster, rpx.cluster);
+    }
+
+    /// Every content's `offset_sectors` must be the running sum of the previous contents' sizes —
+    /// the property that breaks the moment content 0 is mis-sized, since every later offset is
+    /// derived from it.
+    fn assert_cumulative_offsets(contents: &[FstContent]) {
+        for i in 1..contents.len() {
+            assert_eq!(
+                contents[i].offset_sectors,
+                contents[i - 1].offset_sectors + contents[i - 1].size_sectors,
+                "content {i} must start where content {} ends",
+                i - 1
+            );
+        }
+    }
+
+    /// A small package's FST fits in one 0x8000 sector, so content 0 occupies exactly one sector
+    /// and content 1 starts right after it. (This is the case every real title hits today, which
+    /// is why sizing content 0 correctly is byte-identical here.)
+    #[test]
+    fn small_fst_occupies_one_sector_and_content_one_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("code")).unwrap();
+        std::fs::create_dir_all(root.join("content/assets/shaders/cafe")).unwrap();
+        std::fs::create_dir_all(root.join("meta")).unwrap();
+        std::fs::write(root.join("code/app.xml"), b"<app/>").unwrap();
+        std::fs::write(root.join("code/cos.xml"), b"<cos/>").unwrap();
+        std::fs::write(root.join("code/frisbiiU.rpx"), vec![0u8; 100]).unwrap();
+        std::fs::write(
+            root.join("content/assets/shaders/cafe/banner.gsh"),
+            vec![1u8; 50],
+        )
+        .unwrap();
+        std::fs::write(root.join("content/hif_000000.nfs"), vec![2u8; 0x8000]).unwrap();
+        std::fs::write(root.join("meta/meta.xml"), b"<menu/>").unwrap();
+        std::fs::write(root.join("meta/iconTex.tga"), vec![3u8; 200]).unwrap();
+
+        let plan = plan(root, 0x00050002_534b4a45).unwrap();
+        assert!(plan.fst.len() < 0x8000, "this FST must be under one sector");
+        let parsed = Fst::parse(&plan.fst).unwrap();
+        assert_eq!(parsed.contents[0].size_sectors, 1);
+        assert_eq!(parsed.contents[1].offset_sectors, 1);
+        assert_cumulative_offsets(&parsed.contents);
+    }
+
+    /// Once the FST grows past 0x8000 bytes, content 0 spans several sectors — and the old code,
+    /// which read `contents[0].data_len` while it was still 0, always recorded 1, overlapping
+    /// content 0 with content 1. Build a tree with enough files to push the FST over a sector and
+    /// pin the whole cumulative layout.
+    #[test]
+    fn large_fst_spans_multiple_sectors_and_later_contents_follow_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("code")).unwrap();
+        std::fs::create_dir_all(root.join("meta")).unwrap();
+        std::fs::write(root.join("code/app.xml"), b"<app/>").unwrap();
+        std::fs::write(root.join("code/cos.xml"), b"<cos/>").unwrap();
+        std::fs::write(root.join("meta/meta.xml"), b"<menu/>").unwrap();
+        // ~2200 leftover meta files: each costs a 0x10 entry plus its name, so the entry+name
+        // tables alone push the FST well past 0x8000 bytes. They all share the single
+        // leftover-meta content, so the content count stays small.
+        for i in 0..2200 {
+            std::fs::write(root.join(format!("meta/f{i:05}.bin")), b"x").unwrap();
+        }
+
+        let plan = plan(root, 0x00050002_534b4a45).unwrap();
+        assert!(
+            plan.fst.len() > 0x8000,
+            "the FST must exceed one sector for this test to mean anything (got {})",
+            plan.fst.len()
+        );
+        let parsed = Fst::parse(&plan.fst).unwrap();
+        assert_eq!(
+            parsed.contents[0].size_sectors as usize,
+            plan.fst.len().div_ceil(0x8000),
+            "content 0 must be sized from the FST's real length"
+        );
+        assert_eq!(
+            parsed.contents[1].offset_sectors, parsed.contents[0].size_sectors,
+            "content 1 must start after the whole FST, not overlap it"
+        );
+        assert_cumulative_offsets(&parsed.contents);
     }
 
     #[test]

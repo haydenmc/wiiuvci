@@ -255,6 +255,11 @@ pub fn plan_disc(
         let total = (span.data_end_sector - span.data_start_sector) as u64;
         let mut groups: BTreeSet<u32> = BTreeSet::new();
         for (off, bytes) in &edits {
+            // An empty edit covers no bytes, and `len - 1` would wrap into a bogus final sector
+            // (the same guard `crate::nfs::verify_patches_contained` applies to this expression).
+            if bytes.is_empty() {
+                continue;
+            }
             let first = off / DATA as u64;
             let last = (off + bytes.len() as u64 - 1) / DATA as u64;
             for ps in first..=last {

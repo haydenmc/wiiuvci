@@ -183,15 +183,15 @@ pub fn run(mut config: Config, work_dir: &Path) -> Result<Summary> {
     //    fw.img's signature check is patched to accept a zeroed signature, and rejects the disc's
     //    real signature — so an unmodified ticket/TMD boots the framework but hangs the emulator.
     let mut rvlt_tik = source.raw_ticket().to_vec();
-    fakesign(&mut rvlt_tik);
+    fakesign(&mut rvlt_tik)?;
     std::fs::write(staged.code_dir.join("rvlt.tik"), &rvlt_tik)
         .map_err(|e| Error::io(staged.code_dir.join("rvlt.tik"), e))?;
     let mut rvlt_tmd = source.raw_tmd().to_vec();
     if let Some(content_hash) = plan.rvlt_content_hash {
         // Also updates the content hash to the rebuilt H3 table, and zeroes the signature.
-        update_rvlt_tmd(&mut rvlt_tmd, &content_hash);
+        update_rvlt_tmd(&mut rvlt_tmd, &content_hash)?;
     } else {
-        fakesign(&mut rvlt_tmd);
+        fakesign(&mut rvlt_tmd)?;
     }
     std::fs::write(staged.code_dir.join("rvlt.tmd"), &rvlt_tmd)
         .map_err(|e| Error::io(staged.code_dir.join("rvlt.tmd"), e))?;
@@ -315,6 +315,13 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
         nfs_stats.total_bytes
     );
 
+    // Take the ticket/TMD out of the authored disc, which closes its open handle on the scratch
+    // image. This must happen *before* the removal below: on Windows deleting a file that is
+    // still open fails with a sharing violation, and on every platform the blocks stay allocated
+    // until the last handle goes away. (`AuthoredDisc` owns the `File`, so a partial destructure
+    // would not release it — see `AuthoredDisc::into_rvlt`.)
+    let (rvlt_ticket, rvlt_tmd) = authored.into_rvlt();
+
     // The synthetic disc image (a full-disc-size scratch file) is only needed to build the NFS;
     // remove it now instead of leaving it in work_dir alongside the NFS content, which would
     // otherwise roughly double peak scratch usage for the rest of the build.
@@ -333,9 +340,9 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
 
     // 4. Write the synthetic disc's Wii ticket/TMD as rvlt.tik / rvlt.tmd.
     let tik_path = staged.code_dir.join("rvlt.tik");
-    std::fs::write(&tik_path, &authored.rvlt_ticket).map_err(|e| Error::io(&tik_path, e))?;
+    std::fs::write(&tik_path, &rvlt_ticket).map_err(|e| Error::io(&tik_path, e))?;
     let tmd_path = staged.code_dir.join("rvlt.tmd");
-    std::fs::write(&tmd_path, &authored.rvlt_tmd).map_err(|e| Error::io(&tmd_path, e))?;
+    std::fs::write(&tmd_path, &rvlt_tmd).map_err(|e| Error::io(&tmd_path, e))?;
 
     // 5. Patch fw.img: fakesign + homebrew (AHBPROT/MEMPROT) so Nintendont gets hardware access.
     fwimg::patch_file(&staged.code_dir.join("fw.img"), fwimg::HOMEBREW_PATCHES)?;
@@ -363,7 +370,7 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
                 max_pads: gc_opts.max_pads,
                 wiiu_gamepad_slot: gc_opts.wiiu_gamepad_slot,
                 cheat_path: gc_opts.cheat_path.clone(),
-            });
+            })?;
             // Resolve --out to an absolute path first: a bare relative `--out` (e.g. `MyGame`,
             // with no parent component) would otherwise leave `parent()` ambiguous, landing
             // nincfg.bin wherever the process happens to be running from rather than reliably
@@ -533,20 +540,47 @@ fn resolve_textures(config: &Config, platform: &str, game_id: &str, meta_dir: &P
 /// Fakesign a Wii ticket or TMD by zeroing its RSA signature. `fw.img`'s signature check is patched
 /// to accept a zeroed signature, so `rvlt.tik`/`rvlt.tmd` must be fakesigned this way (their
 /// original Nintendo signatures are rejected by the patched check and hang the emulator at boot).
-fn fakesign(data: &mut [u8]) {
-    if data.len() >= WII_SIG.end {
-        data[WII_SIG].fill(0);
+///
+/// A blob too short to hold the signature field is an error, not a no-op: silently skipping the
+/// fakesign ships a `rvlt.tik`/`rvlt.tmd` that still carries a real signature, which the patched
+/// `fw.img` rejects — the build "succeeds" and then hangs at boot on hardware, the hardest kind of
+/// failure to diagnose.
+fn fakesign(data: &mut [u8]) -> Result<()> {
+    if data.len() < WII_SIG.end {
+        return Err(Error::UnsupportedDisc(format!(
+            "ticket/TMD is only {} bytes, too short to hold the RSA signature at 0x{:X}..0x{:X} \
+             that must be zeroed to fakesign it (expected at least {} bytes)",
+            data.len(),
+            WII_SIG.start,
+            WII_SIG.end,
+            WII_SIG.end
+        )));
     }
+    data[WII_SIG].fill(0);
+    Ok(())
 }
 
 /// After a `main.dol` patch or trim, point the Wii partition TMD's single content record at the
 /// rebuilt H3 table and fakesign it. The Wii TMD stores the content hash at `0x1F4` and its
 /// RSA-2048 signature at `0x004..0x104`.
-fn update_rvlt_tmd(tmd: &mut [u8], content_hash: &[u8; 20]) {
-    if tmd.len() >= TMD_CONTENT0_HASH + 20 {
-        tmd[WII_SIG].fill(0);
-        tmd[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20].copy_from_slice(content_hash);
+///
+/// Errors on a TMD too short to hold either field, for the same reason as [`fakesign`]: a skipped
+/// content hash means the disc's rebuilt H3 table no longer matches the TMD, which fails at boot
+/// rather than at build time.
+fn update_rvlt_tmd(tmd: &mut [u8], content_hash: &[u8; 20]) -> Result<()> {
+    if tmd.len() < TMD_CONTENT0_HASH + 20 {
+        return Err(Error::UnsupportedDisc(format!(
+            "TMD is only {} bytes, too short to hold the content hash at 0x{:X}..0x{:X} \
+             (expected at least {} bytes)",
+            tmd.len(),
+            TMD_CONTENT0_HASH,
+            TMD_CONTENT0_HASH + 20,
+            TMD_CONTENT0_HASH + 20
+        )));
     }
+    fakesign(tmd)?;
+    tmd[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20].copy_from_slice(content_hash);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -561,6 +595,59 @@ mod tests {
         assert_eq!(drc_use_value("gcn", false), 1);
         assert_eq!(drc_use_value("wii", true), 1);
         assert_eq!(drc_use_value("wii", false), 0);
+    }
+
+    /// The signature field ends at 0x104. A blob one byte short must be an error, not a silent
+    /// skip — a `rvlt.tik`/`rvlt.tmd` that keeps its real signature is rejected by the patched
+    /// `fw.img` and hangs at boot, long after the build reported success.
+    #[test]
+    fn fakesign_errors_on_a_short_blob_and_zeroes_the_signature_otherwise() {
+        let mut short = vec![0xAAu8; WII_SIG.end - 1];
+        let err = fakesign(&mut short).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedDisc(_)),
+            "expected an unsupported-disc error, got {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&(WII_SIG.end - 1).to_string()) && msg.contains(&WII_SIG.end.to_string()),
+            "error should give the actual and the required length: {msg}"
+        );
+
+        // Exactly long enough: the signature is zeroed and nothing else is touched.
+        let mut exact = vec![0xAAu8; WII_SIG.end];
+        fakesign(&mut exact).unwrap();
+        assert_eq!(&exact[..WII_SIG.start], &[0xAA; 4]);
+        assert!(exact[WII_SIG].iter().all(|&b| b == 0));
+    }
+
+    /// Same boundary for the TMD, which additionally writes the content hash at 0x1F4.
+    #[test]
+    fn update_rvlt_tmd_errors_on_a_short_tmd_and_writes_both_fields_otherwise() {
+        let hash = [0x5Au8; 20];
+        let min = TMD_CONTENT0_HASH + 20;
+
+        let mut short = vec![0xAAu8; min - 1];
+        let err = update_rvlt_tmd(&mut short, &hash).unwrap_err();
+        assert!(
+            matches!(err, Error::UnsupportedDisc(_)),
+            "expected an unsupported-disc error, got {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&(min - 1).to_string()) && msg.contains(&min.to_string()),
+            "error should give the actual and the required length: {msg}"
+        );
+        assert_eq!(short, vec![0xAAu8; min - 1], "a rejected TMD is untouched");
+
+        let mut exact = vec![0xAAu8; min];
+        update_rvlt_tmd(&mut exact, &hash).unwrap();
+        assert!(exact[WII_SIG].iter().all(|&b| b == 0), "signature zeroed");
+        assert_eq!(
+            &exact[TMD_CONTENT0_HASH..min],
+            &hash,
+            "content hash written"
+        );
     }
 
     #[test]

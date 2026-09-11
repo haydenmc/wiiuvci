@@ -48,6 +48,13 @@ pub struct PackageStats {
 ///
 /// Used for the small non-hashed contents (and the FST); large hashed contents are streamed via
 /// [`ContentPlaintextReader`] instead of buffered here.
+///
+/// Every file's size was measured during planning ([`content::plan`]) and is what fixed both this
+/// content's length and the size recorded for the file in the FST. A file that changed on disk
+/// between then and now is therefore a hard error: a file that grew would panic on the slice
+/// bounds, and a file that shrank would be silently zero-padded to its planned size and shipped
+/// that way. Staging writes these files, so this only happens if something outside the build is
+/// mutating the work directory — worth reporting, not worth papering over.
 fn assemble_content(c: &content::PlannedContent, fst: &[u8]) -> Result<Vec<u8>> {
     if c.index == 0 {
         return Ok(fst.to_vec());
@@ -55,6 +62,14 @@ fn assemble_content(c: &content::PlannedContent, fst: &[u8]) -> Result<Vec<u8>> 
     let mut buf = vec![0u8; c.data_len as usize];
     for f in &c.files {
         let bytes = fs::read(&f.path).map_err(|e| Error::io(&f.path, e))?;
+        if bytes.len() as u64 != f.size {
+            return Err(Error::FormatLimit(format!(
+                "{} changed size after planning: expected {} bytes, found {}",
+                f.path.display(),
+                f.size,
+                bytes.len()
+            )));
+        }
         let start = f.offset as usize;
         buf[start..start + bytes.len()].copy_from_slice(&bytes);
     }
@@ -320,6 +335,45 @@ mod tests {
             got2.extend_from_slice(&small[..n]);
         }
         assert_eq!(got2, expected, "small-buffer reads must also match");
+    }
+
+    /// A staged file whose size no longer matches what planning recorded must be an error, in
+    /// both directions: growing would have panicked on the slice bounds, shrinking would have been
+    /// silently zero-padded into the package.
+    #[test]
+    fn assemble_content_rejects_a_file_that_changed_size_after_planning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.xml");
+        let planned = PlannedContent {
+            index: 1,
+            content_type: TYPE_HASHED,
+            files: vec![PlacedFile {
+                path: path.clone(),
+                offset: 0,
+                size: 100,
+            }],
+            data_len: 100,
+            is_game: false,
+        };
+
+        // Exactly the planned size: fine.
+        std::fs::write(&path, vec![0xEE; 100]).unwrap();
+        assert_eq!(assemble_content(&planned, &[]).unwrap(), vec![0xEE; 100]);
+
+        for (label, actual) in [("grew", 128usize), ("shrank", 64)] {
+            std::fs::write(&path, vec![0xEE; actual]).unwrap();
+            let err = assemble_content(&planned, &[]).unwrap_err();
+            assert!(
+                matches!(err, Error::FormatLimit(_)),
+                "a file that {label} should be a format-limit error, got {err}"
+            );
+            let msg = err.to_string();
+            assert!(msg.contains("app.xml"), "error should name the file: {msg}");
+            assert!(
+                msg.contains("100") && msg.contains(&actual.to_string()),
+                "error should give both sizes: {msg}"
+            );
+        }
     }
 
     #[test]
