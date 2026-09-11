@@ -46,6 +46,7 @@ pub const FAKESIGN_A: BytePatch = BytePatch {
     write: &[0x00],
     all: true,
 };
+/// Alternative fakesign patch: neuter the signature check (variant of [`FAKESIGN_A`]).
 pub const FAKESIGN_B: BytePatch = BytePatch {
     name: "fakesign(alt)",
     group: "fakesign",

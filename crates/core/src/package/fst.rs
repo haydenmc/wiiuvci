@@ -46,9 +46,19 @@ pub struct FstContent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FstNodeKind {
     /// A file: raw byte offset within its content, and byte size.
-    File { offset: u64, size: u64 },
+    File {
+        /// Raw byte offset within the file's content.
+        offset: u64,
+        /// Byte size.
+        size: u64,
+    },
     /// A directory: parent entry index, and the index one past its last descendant.
-    Dir { parent_index: u32, end_index: u32 },
+    Dir {
+        /// Index of the parent directory entry.
+        parent_index: u32,
+        /// Index one past the last descendant of this directory.
+        end_index: u32,
+    },
 }
 
 /// A file/directory entry.

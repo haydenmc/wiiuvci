@@ -26,6 +26,28 @@ pub const TYPE_NONHASHED: u16 = 0x2001;
 /// TMD/FST content type for hashed content.
 pub const TYPE_HASHED: u16 = 0x2003;
 
+// FST directory and file flags.
+/// FST flags for code directory/files.
+const FST_FLAGS_CODE: u16 = 0x0000;
+/// FST flags for content directory/files.
+const FST_FLAGS_CONTENT: u16 = 0x0400;
+/// FST flags for meta directory/files.
+const FST_FLAGS_META: u16 = 0x0040;
+
+// FST content table flags.
+/// FST content table flag indicating hashed content.
+const CONTENT_FLAG_HASHED: u16 = 0x0200;
+/// FST content table flag indicating non-hashed content.
+const CONTENT_FLAG_NONHASHED: u16 = 0x0100;
+/// Group id stamped on hashed metadata contents (retail uses 0x0400 for the meta group).
+const CONTENT_GROUP_META: u32 = 0x0400;
+/// Group id stamped on non-hashed (code/FST) contents: none.
+const CONTENT_GROUP_NONE: u32 = 0x0000;
+
+// FST entry-type flags.
+/// FST entry-type flag for HIF (game data) files.
+const ENTRY_TYPE_HIF: u8 = 0x02;
+
 const SECTOR: u64 = 0x8000;
 
 /// A file placed within a content, at a byte offset relative to the content start.
@@ -321,31 +343,36 @@ pub fn plan(build_dir: &Path, title_id: u64) -> Result<PackagePlan> {
     // Build the FST directory tree (code, content, meta) referencing the assigned clusters.
     let mut root_children = Vec::new();
     if code_dir.is_dir() {
-        let children = build_dir_tree(&code_dir, 0x0000, 0x0000, &cluster_of)?;
+        let children = build_dir_tree(&code_dir, FST_FLAGS_CODE, FST_FLAGS_CODE, &cluster_of)?;
         if !children.is_empty() {
             root_children.push(Tree::Dir {
                 name: "code".into(),
-                flags: 0x0000,
+                flags: FST_FLAGS_CODE,
                 children,
             });
         }
     }
     if content_dir.is_dir() {
-        let children = build_dir_tree(&content_dir, 0x0400, 0x0400, &cluster_of)?;
+        let children = build_dir_tree(
+            &content_dir,
+            FST_FLAGS_CONTENT,
+            FST_FLAGS_CONTENT,
+            &cluster_of,
+        )?;
         if !children.is_empty() {
             root_children.push(Tree::Dir {
                 name: "content".into(),
-                flags: 0x0400,
+                flags: FST_FLAGS_CONTENT,
                 children,
             });
         }
     }
     if meta_dir.is_dir() {
-        let children = build_dir_tree(&meta_dir, 0x0040, 0x0040, &cluster_of)?;
+        let children = build_dir_tree(&meta_dir, FST_FLAGS_META, FST_FLAGS_META, &cluster_of)?;
         if !children.is_empty() {
             root_children.push(Tree::Dir {
                 name: "meta".into(),
-                flags: 0x0040,
+                flags: FST_FLAGS_META,
                 children,
             });
         }
@@ -392,11 +419,11 @@ pub fn plan(build_dir: &Path, title_id: u64) -> Result<PackagePlan> {
     for c in &contents {
         let size_sectors = align_up(c.data_len.max(1), SECTOR) / SECTOR;
         let (owner_title_id, group_id, flags) = if c.is_game {
-            (game_owner_title_id, game_group_id, 0x0200u16)
+            (game_owner_title_id, game_group_id, CONTENT_FLAG_HASHED)
         } else {
             match c.content_type {
-                TYPE_HASHED => (0, 0x0400u32, 0x0200u16),
-                _ => (0, 0x0000, 0x0100),
+                TYPE_HASHED => (0, CONTENT_GROUP_META, CONTENT_FLAG_HASHED),
+                _ => (0, CONTENT_GROUP_NONE, CONTENT_FLAG_NONHASHED),
             }
         };
         fst_contents.push(FstContent {
@@ -440,7 +467,7 @@ fn collect_files(dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
 }
 
 /// Build the FST subtree for `dir`, taking each file's content index from `cluster_of` (assigned
-/// during content allocation). `hif_*.nfs` files carry the 0x02 entry-type flag.
+/// during content allocation). `hif_*.nfs` files carry the [`ENTRY_TYPE_HIF`] entry-type flag.
 fn build_dir_tree(
     dir: &Path,
     dir_flags: u16,
@@ -463,7 +490,7 @@ fn build_dir_tree(
             let cluster = *cluster_of.get(&path).ok_or_else(|| {
                 Error::UnsupportedDisc(format!("{} was not assigned to a content", path.display()))
             })?;
-            let type_flags = if is_hif(&name) { 0x02 } else { 0x00 };
+            let type_flags = if is_hif(&name) { ENTRY_TYPE_HIF } else { 0x00 };
             out.push(Tree::File {
                 name,
                 path,

@@ -546,7 +546,7 @@ impl SourceDisc {
         // first and fail with a bare short read). `plan_group_runs` re-checks; this only fixes
         // *which* error a corrupt disc gets.
         for &(off, len) in &extents {
-            let _ = extent_groups(off, len, data_size)?;
+            extent_groups(off, len, data_size)?;
         }
 
         // Zero-fill trimming: find the wholly-zero FST files whose contained groups can be dropped.

@@ -45,6 +45,15 @@ const OFF_VIDEOOFFSET: usize = 0x21E;
 const OFF_NETWORKPROFILE: usize = 0x21F;
 const OFF_WIIU_GAMEPAD_SLOT: usize = 0x220;
 
+// The four single-byte fields after MemCardBlocks are contiguous and lead straight into
+// WiiUGamepadSlot; pin that so an offset edit cannot silently shift the tail of the record.
+const _: () = assert!(
+    OFF_MEMCARDBLOCKS + 1 == OFF_VIDEOSCALE
+        && OFF_VIDEOSCALE + 1 == OFF_VIDEOOFFSET
+        && OFF_VIDEOOFFSET + 1 == OFF_NETWORKPROFILE
+        && OFF_NETWORKPROFILE + 1 == OFF_WIIU_GAMEPAD_SLOT
+);
+
 const PATH_LEN: usize = 255;
 
 // `NIN_CFG.Config` bit flags (subset we use; see Nintendont `CommonConfig.h`).
@@ -257,9 +266,9 @@ pub fn generate(opts: &NincfgOptions) -> Result<[u8; NINCFG_SIZE]> {
     // GameID is 4 ASCII bytes stored in reading order (equivalent to a big-endian u32).
     buf[OFF_GAMEID..OFF_GAMEID + 4].copy_from_slice(&opts.game_id);
     buf[OFF_MEMCARDBLOCKS] = opts.memcard_blocks;
-    buf[OFF_VIDEOSCALE] = 0; // s8, centered
-    buf[OFF_VIDEOOFFSET] = 0; // s8, centered
-    buf[OFF_NETWORKPROFILE] = 0;
+    // VideoScale and VideoOffset are s8 signed bytes; zero centers the screen on both axes.
+    // NetworkProfile = 0 (default); these three fields are documented by their OFF_* constants
+    // and intentionally left at their zero defaults.
     put_u32(&mut buf, OFF_WIIU_GAMEPAD_SLOT, opts.wiiu_gamepad_slot);
 
     Ok(buf)
