@@ -17,6 +17,7 @@
 //! 0x000000   disc header (game id, Wii magic 0x5D1C9EA3 @0x18, disc title)
 //! 0x040000   partition table: one group, one DATA partition
 //! 0x04E000   region info
+//! 0x04FFFC   disc magic 2 (0xC3F81A8E, present on every retail disc)
 //! (sparse gap — never stored)
 //! 0xF800000  partition (the retail single-layer offset — required to boot on hardware):
 //!              +0x00000  ticket (0x2A4, fakesigned, arbitrary title key)
@@ -66,6 +67,27 @@ const REGION_INFO_ABS: u64 = 0x4E000;
 /// Bytes of the disc before the partition worth materializing: disc header, partition table
 /// (0x40000) and region info (0x4E000). Everything up to [`PART_ABS`] after this is a sparse hole.
 const DISC_HEADER_LEN: usize = 0x50000;
+
+// Ticket/TMD constants copied from the known-good reference carrier disc (the `wit`-built
+// "PunEmu 1.1" template every TeconMoon/UWUVCI GameCube inject ships). None of these is
+// semantically required as far as we know — they are matched so that, given the same apploader,
+// forwarder and disc id, the authored disc is byte-identical to the reference (the standard this
+// project holds every output to), which is what lets a hardware test isolate the *other*
+// variables. Real Wii tickets never carry a zero ticket id, so a non-zero one is kept regardless.
+const REF_TICKET_ID: u64 = 0x0001_B7C5_B7D2_80B4;
+/// The reference ticket's (encrypted) title key. Arbitrary: the NFS stores the partition
+/// decrypted, so the key is never used to decrypt anything.
+const REF_TITLE_KEY: [u8; 16] = [
+    0xFB, 0x1A, 0x55, 0xB4, 0xA6, 0xB6, 0x5C, 0x46, 0x8B, 0x91, 0xEF, 0x66, 0x29, 0xD7, 0x6E, 0x8F,
+];
+/// The reference TMD's content size field (a full single-layer partition, 0xFF7C0000 — a template
+/// leftover; the real data size is in the partition header, which is what the framework uses).
+const REF_TMD_CONTENT_SIZE: u64 = 0xFF7C_0000;
+/// Every retail Wii disc — and every inject known to boot, including the reference GameCube
+/// carrier — ends its header area with this magic at 0x4FFFC (`WII_MAGIC2` in wit's `wiidisc.h`).
+/// Our synthetic disc was the only disc without it.
+const DISC_MAGIC2_ABS: usize = 0x4FFFC;
+const DISC_MAGIC2: u32 = 0xC3F8_1A8E;
 
 // Partition-relative offsets.
 const TICKET_LEN: usize = 0x2A4;
@@ -236,7 +258,11 @@ fn build_sys_blob(
     // The FST size is fixed (2 entries + "game.iso\0"), so game.iso's offset is known before we
     // serialize the FST (which needs that offset).
     let fst_len = align_up(2 * 12 + b"game.iso\0".len(), 4);
-    let iso_off = align_up(fst_off + fst_len, ALIGN);
+    // Place game.iso on a hash-group boundary (0x1F0000), matching what `wit` — the disc builder
+    // TeconMoon/UWUVCI use — produces. `wit` group-aligns the first big file, so a booting
+    // reference disc has game.iso at 0x1F0000; our old 0x20 alignment packed it right after the
+    // FST (~0x34b60), the only remaining structural divergence from the reference synthetic disc.
+    let iso_off = align_up(fst_off + fst_len, GROUP_LOGICAL_SIZE as usize);
     let fst = build_fst(iso_off as u64, iso_size)?;
     debug_assert_eq!(fst.len(), fst_len);
     sys.extend_from_slice(&fst);
@@ -283,20 +309,29 @@ fn build_wii_ticket(title_id: u64) -> Vec<u8> {
     let mut t = vec![0u8; TICKET_LEN];
     put_u32(&mut t, 0x000, WII_SIG_RSA2048_SHA1); // signature (0x004..0x104) left zero = fakesigned
     t[0x140..0x140 + 26].copy_from_slice(b"Root-CA00000001-XS00000003");
-    // An arbitrary encrypted title key (value is a don't-care for the decrypted NFS path).
-    t[0x1BF..0x1BF + 16].copy_from_slice(&[0xFE; 16]);
+    // Encrypted title key (a don't-care for the decrypted NFS path) and ticket id (real tickets
+    // always carry a non-zero one): both taken from the reference carrier disc, see REF_*.
+    t[0x1BF..0x1BF + 16].copy_from_slice(&REF_TITLE_KEY);
+    t[0x1D0..0x1D8].copy_from_slice(&REF_TICKET_ID.to_be_bytes());
     t[0x1DC..0x1E4].copy_from_slice(&title_id.to_be_bytes());
+    // 0x1E4 (u16): a fixed field every retail Wii ticket sets to 0xFFFF (left zero, ES rejects the
+    // ticket — reboot). 0x1E6 (ticket title version) stays zero, as on the reference inject.
+    t[0x1E4..0x1E6].copy_from_slice(&0xFFFFu16.to_be_bytes());
     t[0x1F1] = 0; // common key index
                   // Content-access permission mask (0x222, one bit per content index): grant access
                   // to every content. Left zero, the framework treats the disc's content as
                   // inaccessible; a valid ticket grants it (the reference inject sets this too).
     t[0x222..0x242].copy_from_slice(&[0xFF; 0x20]);
+    // A stray byte inside the reference ticket's access-permission area; matched for byte-identity.
+    t[0x24C] = 0x02;
     t
 }
 
 /// Build a minimal fakesigned Wii TMD (0x208 bytes) with a single content whose SHA-1 is the H3
-/// table hash. `content_size` is the encrypted partition data size (clusters × 0x8000).
-fn build_wii_tmd(title_id: u64, content_size: u64, h3_hash: &[u8; 20]) -> Vec<u8> {
+/// table hash. The content size field carries the reference template's value
+/// ([`REF_TMD_CONTENT_SIZE`]) rather than the real data size — retail discs record the real size,
+/// but the booting reference does not, and the partition header holds the authoritative size.
+fn build_wii_tmd(title_id: u64, h3_hash: &[u8; 20]) -> Vec<u8> {
     let mut m = vec![0u8; TMD_LEN];
     put_u32(&mut m, 0x000, WII_SIG_RSA2048_SHA1); // signature (0x004..0x104) left zero = fakesigned
     m[0x140..0x140 + 26].copy_from_slice(b"Root-CA00000001-CP00000004");
@@ -307,12 +342,13 @@ fn build_wii_tmd(title_id: u64, content_size: u64, h3_hash: &[u8; 20]) -> Vec<u8
     m[0x18C..0x194].copy_from_slice(&title_id.to_be_bytes()); // title id
     put_u32(&mut m, 0x194, 1); // title type: normal
     m[0x198..0x19A].copy_from_slice(b"01"); // group id (matches the reference)
+    m[0x19A] = 0x03; // "zero"/region area byte the reference carries (retail TMDs vary here too)
     m[0x1DE..0x1E0].copy_from_slice(&1u16.to_be_bytes()); // one content
                                                           // Content record 0 at 0x1E4: id, index, type, size, hash.
     put_u32(&mut m, 0x1E4, 0); // content id
     m[0x1E8..0x1EA].copy_from_slice(&0u16.to_be_bytes()); // index
     m[0x1EA..0x1EC].copy_from_slice(&3u16.to_be_bytes()); // type (reference uses 0x0003 for the disc content)
-    m[0x1EC..0x1F4].copy_from_slice(&content_size.to_be_bytes());
+    m[0x1EC..0x1F4].copy_from_slice(&REF_TMD_CONTENT_SIZE.to_be_bytes());
     m[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20].copy_from_slice(h3_hash);
     m
 }
@@ -423,7 +459,7 @@ pub fn author_gc_disc(
 
     let content_hash: [u8; 20] = Sha1::digest(&h3_table).into();
     let ticket = build_wii_ticket(title_id);
-    let tmd = build_wii_tmd(title_id, data_size, &content_hash);
+    let tmd = build_wii_tmd(title_id, &content_hash);
 
     // Write the disc header (at 0) and the partition header (at PART_ABS) with the computed H3
     // table and TMD. The gap between them is left as a sparse hole in the scratch file.
@@ -524,6 +560,12 @@ fn build_disc_header(game_id: &[u8; 6], disc_title: &str) -> Vec<u8> {
     put_u32(&mut p, pt + 4, ((PARTITION_TABLE_ABS + 0x20) >> 2) as u32); // info table offset
     put_u32(&mut p, pt + 0x20, (PART_ABS >> 2) as u32); // partition offset
     put_u32(&mut p, pt + 0x24, 0); // type 0 = DATA
+                                   // Two `wit` artefacts the reference carrier disc carries (matched for byte-identity; both are
+                                   // dead data): group 1 has zero partitions but still points its info table at 0x20, and the
+                                   // otherwise-unused sector at 0x48000 holds a u32 9 at +0xC.
+    put_u32(&mut p, pt + 0x0C, 0x20 >> 2);
+    put_u32(&mut p, 0x4800C, 9);
+    put_u32(&mut p, DISC_MAGIC2_ABS, DISC_MAGIC2);
 
     // Region info, derived from the game id's region character so a non-Japanese game doesn't
     // present itself as NTSC-J (see `region_info_for`).
@@ -624,6 +666,41 @@ mod tests {
                 region as char
             );
         }
+    }
+
+    /// Byte-pins against the known-good reference carrier disc (a TeconMoon GameCube inject): the
+    /// disc-header magic at 0x4FFFC, the two `wit` table artefacts, and the ticket/TMD constants.
+    /// With the reference apploader/forwarder/disc id supplied, the authored disc's header,
+    /// partition header and system files were verified byte-identical to the reference NFS.
+    #[test]
+    fn header_and_ticket_tmd_match_the_reference_carrier_disc() {
+        let p = build_disc_header(b"CEMU69", "PunEmu 1.1");
+        assert_eq!(&p[0x4FFFC..0x50000], &0xC3F8_1A8Eu32.to_be_bytes());
+        assert_eq!(
+            &p[0x40000..0x40010],
+            &[0, 0, 0, 1, 0, 1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 8]
+        );
+        assert_eq!(
+            &p[0x48000..0x48010],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]
+        );
+        assert_eq!(
+            &p[0x4E000..0x4E004],
+            &[0, 0, 0, 2],
+            "'U' region char ⇒ PAL, as the reference"
+        );
+
+        let title_id = wii_disc_title_id(b"CEMU69");
+        assert_eq!(title_id, 0x0001_0000_4345_4D55);
+        let t = build_wii_ticket(title_id);
+        assert_eq!(&t[0x1BF..0x1CF], &REF_TITLE_KEY);
+        assert_eq!(&t[0x1D0..0x1D8], &REF_TICKET_ID.to_be_bytes());
+        assert_eq!(&t[0x1E4..0x1E6], &[0xFF, 0xFF]);
+        assert_eq!(t[0x24C], 0x02);
+        let m = build_wii_tmd(title_id, &[0xAB; 20]);
+        assert_eq!(&m[0x184..0x18C], &0x0000_0001_0000_0023u64.to_be_bytes());
+        assert_eq!(&m[0x198..0x19C], b"01\x03\x00");
+        assert_eq!(&m[0x1EC..0x1F4], &REF_TMD_CONTENT_SIZE.to_be_bytes());
     }
 
     /// A game image too large for the FST's u32 size field must be rejected with an error (and no
