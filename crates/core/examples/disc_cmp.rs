@@ -3,26 +3,17 @@
 //! isolates data-correctness (do the files' bytes match?) from layout/compaction (offsets differ).
 //!
 //! Run: cargo run -p wiivci-core --release --example disc_cmp -- <source.rvz> <ref_hif.nfs> <workdir>
+mod common;
+
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use nod::{Disc, OpenOptions, PartitionKind};
+use nod::{Disc, PartitionKind};
 use wiivci_core::disc_patch::plan_disc;
 use wiivci_core::input::SourceDisc;
 use wiivci_core::nfs::build_nfs;
 use wiivci_core::video::VideoPatches;
-
-fn open(path: &Path) -> Disc {
-    Disc::new_with_options(
-        path,
-        &OpenOptions {
-            rebuild_encryption: false,
-            ..Default::default()
-        },
-    )
-    .expect("open disc")
-}
 
 /// name -> (logical offset, length)
 fn file_map(disc: &Disc) -> (bool, HashMap<String, (u64, u64)>) {
@@ -41,37 +32,35 @@ fn file_map(disc: &Disc) -> (bool, HashMap<String, (u64, u64)>) {
     (is_wii, m)
 }
 
-fn main() {
-    let mut a = std::env::args().skip(1);
-    let src = a
-        .next()
-        .expect("usage: disc_cmp <source> <ref_hif> <workdir>");
-    let refhif = a.next().expect("ref_hif");
-    let work = a.next().expect("workdir");
-    let work = Path::new(&work);
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    common::usage_or_exit(&args, 3, "usage: disc_cmp <source> <ref_hif> <workdir>");
+    let src = &args[0];
+    let refhif = &args[1];
+    let work = Path::new(&args[2]);
     let content = work.join("content");
-    std::fs::create_dir_all(&content).unwrap();
+    std::fs::create_dir_all(&content)?;
 
     // Build my disc.
     eprintln!("building my NFS from {src} ...");
     let htk = [0x5Au8; 16];
-    let mut source = SourceDisc::open(&src).unwrap();
-    let plan = plan_disc(&mut source, &VideoPatches::default(), true, false).unwrap();
-    build_nfs(&mut source, &htk, &content, &plan).unwrap();
+    let mut source = SourceDisc::open(src)?;
+    let plan = plan_disc(&mut source, &VideoPatches::default(), true, false)?;
+    build_nfs(&mut source, &htk, &content, &plan)?;
     let code = work.join("code");
-    std::fs::create_dir_all(&code).unwrap();
-    std::fs::write(code.join("htk.bin"), htk).unwrap();
+    std::fs::create_dir_all(&code)?;
+    std::fs::write(code.join("htk.bin"), htk)?;
     eprintln!("built. opening both discs ...");
 
-    let mine = open(&content.join("hif_000000.nfs"));
-    let refd = open(Path::new(&refhif));
+    let mine = common::open_decrypted_disc(&content.join("hif_000000.nfs"))?;
+    let refd = common::open_decrypted_disc(Path::new(refhif))?;
 
     // Partition-level structural summary.
     for (label, d) in [("MINE", &mine), ("REF ", &refd)] {
         for p in d.partitions() {
             if p.kind == PartitionKind::Data {
-                let mut part = d.open_partition_kind(PartitionKind::Data).unwrap();
-                let m = part.meta().unwrap();
+                let mut part = d.open_partition_kind(PartitionKind::Data)?;
+                let m = part.meta()?;
                 println!(
                     "{label}: data_start={} data_end={} tmd_len={} tik_len={} h3_len={}",
                     p.data_start_sector,
@@ -86,23 +75,23 @@ fn main() {
 
     // Compare disc header (boot.bin 0x0..0x440) — game id/magic should match; offsets differ.
     {
-        let (_, mut mp) = (0, mine.open_partition_kind(PartitionKind::Data).unwrap());
-        let (_, mut rp) = (0, refd.open_partition_kind(PartitionKind::Data).unwrap());
+        let mut mp = mine.open_partition_kind(PartitionKind::Data)?;
+        let mut rp = refd.open_partition_kind(PartitionKind::Data)?;
         let mut mb = [0u8; 0x440];
         let mut rb = [0u8; 0x440];
-        mp.seek(SeekFrom::Start(0)).unwrap();
-        mp.read_exact(&mut mb).unwrap();
-        rp.seek(SeekFrom::Start(0)).unwrap();
-        rp.read_exact(&mut rb).unwrap();
+        mp.seek(SeekFrom::Start(0))?;
+        mp.read_exact(&mut mb)?;
+        rp.seek(SeekFrom::Start(0))?;
+        rp.read_exact(&mut rb)?;
         println!(
             "boot.bin: gameid_match={} dol_off mine={:#x} ref={:#x} fst_off mine={:#x} ref={:#x} fst_sz mine={:#x} ref={:#x}",
             mb[0..0x20] == rb[0..0x20],
-            (u32::from_be_bytes(mb[0x420..0x424].try_into().unwrap()) as u64) << 2,
-            (u32::from_be_bytes(rb[0x420..0x424].try_into().unwrap()) as u64) << 2,
-            (u32::from_be_bytes(mb[0x424..0x428].try_into().unwrap()) as u64) << 2,
-            (u32::from_be_bytes(rb[0x424..0x428].try_into().unwrap()) as u64) << 2,
-            (u32::from_be_bytes(mb[0x428..0x42c].try_into().unwrap()) as u64) << 2,
-            (u32::from_be_bytes(rb[0x428..0x42c].try_into().unwrap()) as u64) << 2,
+            (common::be32(&mb[0x420..]) as u64) << 2,
+            (common::be32(&rb[0x420..]) as u64) << 2,
+            (common::be32(&mb[0x424..]) as u64) << 2,
+            (common::be32(&rb[0x424..]) as u64) << 2,
+            (common::be32(&mb[0x428..]) as u64) << 2,
+            (common::be32(&rb[0x428..]) as u64) << 2,
         );
     }
 
@@ -111,8 +100,8 @@ fn main() {
     let (_, rmap) = file_map(&refd);
     println!("files: mine={} ref={}", mmap.len(), rmap.len());
 
-    let mut mp = mine.open_partition_kind(PartitionKind::Data).unwrap();
-    let mut rp = refd.open_partition_kind(PartitionKind::Data).unwrap();
+    let mut mp = mine.open_partition_kind(PartitionKind::Data)?;
+    let mut rp = refd.open_partition_kind(PartitionKind::Data)?;
 
     let mut only_mine = 0u64;
     let mut only_ref = 0u64;
@@ -143,10 +132,10 @@ fn main() {
                 let mut first_diff = None;
                 while off < ml {
                     let n = ((ml - off) as usize).min(mbuf.len());
-                    mp.seek(SeekFrom::Start(mo + off)).unwrap();
-                    mp.read_exact(&mut mbuf[..n]).unwrap();
-                    rp.seek(SeekFrom::Start(ro + off)).unwrap();
-                    rp.read_exact(&mut rbuf[..n]).unwrap();
+                    mp.seek(SeekFrom::Start(mo + off))?;
+                    mp.read_exact(&mut mbuf[..n])?;
+                    rp.seek(SeekFrom::Start(ro + off))?;
+                    rp.read_exact(&mut rbuf[..n])?;
                     if mbuf[..n] != rbuf[..n] {
                         ok = false;
                         for i in 0..n {
@@ -187,4 +176,5 @@ fn main() {
     for e in &mismatch_examples {
         println!("  {e}");
     }
+    Ok(())
 }

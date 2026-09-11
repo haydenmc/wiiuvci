@@ -1,17 +1,19 @@
 //! Open a recon'd disc with Wii-hash validation ENABLED and read the whole data partition,
 //! reporting the first offset where a hash check fails (mirrors Nintendont's hash-verified DI read).
 //! Run: cargo run -p wiivci-core --release --example validate_part -- <recon_dir> [read_len_hex]
+mod common;
+
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use nod::{Disc, OpenOptions, PartitionKind};
 
 fn main() {
-    let dir = std::env::args()
-        .nth(1)
-        .expect("usage: validate_part <recon_dir> [len]");
-    let cap = std::env::args()
-        .nth(2)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    common::usage_or_exit(&args, 1, "usage: validate_part <recon_dir> [len]");
+    let dir = &args[0];
+    let cap = args
+        .get(1)
         .map(|s| usize::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
         .unwrap_or(0x0060_0000);
     let hif = Path::new(&dir).join("content").join("hif_000000.nfs");

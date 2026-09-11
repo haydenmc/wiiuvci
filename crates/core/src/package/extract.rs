@@ -55,7 +55,11 @@ fn decode_content(rec: &ContentRecord, title_key: &[u8; 16], cipher: &[u8]) -> R
 }
 
 /// Reconstruct each FST node's full path (root is ""). Directories included.
-fn node_paths(fst: &Fst) -> Vec<String> {
+///
+/// Public so diagnostic tools (`crates/core/examples/`) that need file paths out of a decoded
+/// FST — without re-extracting a whole title — can reuse this instead of re-implementing the
+/// stack-based directory-range walk.
+pub fn node_paths(fst: &Fst) -> Vec<String> {
     let mut paths = vec![String::new(); fst.nodes.len()];
     // Stack of (end_index, path) for the currently-open directories.
     let mut stack: Vec<(u32, String)> = Vec::new();
