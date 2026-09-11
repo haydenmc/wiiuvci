@@ -34,7 +34,7 @@ struct Cli {
 
     /// Instead of --base, download the base from NUS: its 16-hex title id
     /// (e.g. 00050000101B0700). Requires --base-title-key.
-    #[arg(long, value_name = "HEX16")]
+    #[arg(long, value_name = "HEX16", requires = "base_title_key")]
     base_title_id: Option<String>,
 
     /// Encrypted title key (32 hex) for the NUS base title, as found in title-key databases.
@@ -284,10 +284,12 @@ fn build_base(cli: &Cli, wiiu_common_key: &WiiUCommonKey) -> Result<Box<dyn Base
         .expect("arg group guarantees this");
     let title_id = u64::from_str_radix(title_id_hex.trim(), 16)
         .with_context(|| format!("invalid --base-title-id {title_id_hex:?}"))?;
+    // clap's `requires = "base_title_key"` on `base_title_id` guarantees this is `Some` whenever
+    // we get here (this branch is only reached when `base_title_id` is set).
     let key_hex = cli
         .base_title_key
         .as_ref()
-        .ok_or_else(|| anyhow!("--base-title-key is required with --base-title-id"))?;
+        .expect("clap's `requires` enforces --base-title-key with --base-title-id");
     let enc_title_key = parse_hex::<16>(key_hex).context("invalid --base-title-key")?;
     let client = match &cli.nus_url {
         Some(url) => NusClient::with_base_url(url),
@@ -300,6 +302,21 @@ fn build_base(cli: &Cli, wiiu_common_key: &WiiUCommonKey) -> Result<Box<dyn Base
         cli.base_version,
         client,
     )))
+}
+
+/// Validate and parse `--gc-disc-id`: exactly 6 ASCII alphanumeric characters (the format `nod`/
+/// Nintendont expect for a disc id). `<[u8; 6]>::try_from(s.as_bytes())` alone would only check
+/// **byte** length, so a 3-character multibyte string (e.g. `"ÄÄÄ"`, 6 UTF-8 bytes) would pass;
+/// checking each byte is ASCII alphanumeric rules that out and keeps char count == byte count.
+fn parse_gc_disc_id(id: &str) -> Result<[u8; 6]> {
+    if id.len() != 6 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(anyhow!(
+            "--gc-disc-id must be exactly 6 ASCII alphanumeric characters (got {id:?})"
+        ));
+    }
+    let mut out = [0u8; 6];
+    out.copy_from_slice(id.as_bytes());
+    Ok(out)
 }
 
 /// Resolve GameCube (Nintendont) options: obtain Nintendont's `boot.dol` (a local file or a
@@ -325,12 +342,11 @@ fn build_gc_options(cli: &Cli) -> Result<GameCubeOptions> {
         }
         None => Vec::new(),
     };
-    let disc_id = match &cli.gc_disc_id {
-        Some(id) => Some(<[u8; 6]>::try_from(id.as_bytes()).map_err(|_| {
-            anyhow!("--gc-disc-id must be exactly 6 ASCII characters (got {id:?})")
-        })?),
-        None => None,
-    };
+    let disc_id = cli
+        .gc_disc_id
+        .as_deref()
+        .map(parse_gc_disc_id)
+        .transpose()?;
     Ok(GameCubeOptions {
         nintendont_dol,
         apploader,
@@ -377,26 +393,79 @@ fn load_wiiu_key(arg: &str) -> Result<WiiUCommonKey> {
     WiiUCommonKey::parse(&raw).context("invalid Wii U common key")
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
-    let wiiu_common_key = load_wiiu_key(&cli.wiiu_common_key)?;
-    let cert = CertChain::load(&cli.cert)
-        .with_context(|| format!("loading certificate chain {}", cli.cert.display()))?;
-    let base = build_base(&cli, &wiiu_common_key)?;
-
-    // GameCube mode: explicit flag or auto-detected from the input image.
-    let is_gamecube = cli.gamecube || matches!(probe(&cli.input), Ok(DiscKind::GameCube));
-    if is_gamecube && (cli.deflicker || cli.half_vfilter || cli.remove_dithering) {
-        eprintln!("note: --deflicker/--half-vfilter/--remove-dithering are Wii-only and ignored for GameCube");
+/// GameCube-only flags/settings (see `GC_NINCFG_HEADING`, plus `--nintendont`/`--apploader`/
+/// `--gc-disc-id`/`--gc-disc-title`) that were explicitly given, returned by name for a warning
+/// when the input turns out to be a Wii disc and they'd otherwise be silently ignored.
+///
+/// clap can tell us whether an arg was given via `ArgMatches::value_source`, but that needs the
+/// raw `ArgMatches` threaded through separately from the parsed `Cli`; comparing each field
+/// against its documented default is simpler here and just as accurate, since every one of these
+/// fields' defaults are fixed constants (not e.g. read from the environment).
+fn gc_only_flags_given(cli: &Cli) -> Vec<&'static str> {
+    let mut given = Vec::new();
+    if cli.widescreen {
+        given.push("--widescreen");
     }
-    let gamecube = if is_gamecube {
-        Some(build_gc_options(&cli)?)
-    } else {
-        None
-    };
+    if !matches!(cli.gc_language, GcLangArg::Auto) {
+        given.push("--gc-language");
+    }
+    if !matches!(cli.gc_video, GcVideoArg::Auto) {
+        given.push("--gc-video");
+    }
+    if cli.no_memcard {
+        given.push("--no-memcard");
+    }
+    if cli.gc_memcard_blocks != 2 {
+        given.push("--gc-memcard-blocks");
+    }
+    if cli.gc_max_pads != 4 {
+        given.push("--gc-max-pads");
+    }
+    if cli.gc_gamepad_slot != 0 {
+        given.push("--gc-gamepad-slot");
+    }
+    if cli.cheats.is_some() {
+        given.push("--cheats");
+    }
+    if cli.nintendont.is_some() {
+        given.push("--nintendont");
+    }
+    if cli.apploader.is_some() {
+        given.push("--apploader");
+    }
+    if cli.gc_disc_id.is_some() {
+        given.push("--gc-disc-id");
+    }
+    if cli.gc_disc_title.is_some() {
+        given.push("--gc-disc-title");
+    }
+    given
+}
 
-    let config = Config {
+/// Wii-only flags (see [`Config::skip_gaps`]/[`Config::trim_zeros`]) that were explicitly given,
+/// for a warning when the input turns out to be GameCube and they'd otherwise be silently ignored.
+fn wii_only_flags_given(cli: &Cli) -> Vec<&'static str> {
+    let mut given = Vec::new();
+    if cli.keep_gaps {
+        given.push("--keep-gaps");
+    }
+    if cli.trim_zeros {
+        given.push("--trim-zeros");
+    }
+    given
+}
+
+/// Build the pipeline [`Config`] from parsed CLI args plus the already-resolved base/key/cert/
+/// GameCube options. Kept as a pure mapping (no I/O) so the `--no-*` / opt-in inversions are
+/// unit-testable without a filesystem or network.
+fn config_from_cli(
+    cli: Cli,
+    base: Box<dyn BaseSource>,
+    wiiu_common_key: WiiUCommonKey,
+    cert: CertChain,
+    gamecube: Option<GameCubeOptions>,
+) -> Config {
+    Config {
         input: cli.input,
         base,
         out: cli.out,
@@ -417,9 +486,14 @@ fn run() -> Result<()> {
         skip_gaps: !cli.keep_gaps,
         trim_zeros: cli.trim_zeros,
         gamecube,
-    };
+    }
+}
 
-    // Use a caller-provided work dir, or a temp dir cleaned up on completion.
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Validate/create --work-dir before anything that might hit the network (NUS base download,
+    // Nintendont fetch), so a dirty work dir is rejected without a wasted round-trip.
     let (work_path, _guard) = match &cli.work_dir {
         Some(dir) => {
             prepare_work_dir(dir)?;
@@ -430,6 +504,55 @@ fn run() -> Result<()> {
             (tmp.path().to_path_buf(), Some(tmp))
         }
     };
+
+    let wiiu_common_key = load_wiiu_key(&cli.wiiu_common_key)?;
+    let cert = CertChain::load(&cli.cert)
+        .with_context(|| format!("loading certificate chain {}", cli.cert.display()))?;
+    let base = build_base(&cli, &wiiu_common_key)?;
+
+    // GameCube mode: explicit flag, or auto-detected by probing the input's disc header. Skip the
+    // probe when --gamecube forces the mode, since it's meaningless there; otherwise propagate a
+    // probe failure (missing file, or an image that's neither Wii nor GameCube) instead of
+    // silently falling through to the Wii path and failing later with a vaguer error.
+    let is_gamecube = if cli.gamecube {
+        true
+    } else {
+        probe(&cli.input).with_context(|| format!("probing input {}", cli.input.display()))?
+            == DiscKind::GameCube
+    };
+
+    if is_gamecube {
+        if cli.deflicker || cli.half_vfilter || cli.remove_dithering {
+            log::warn!(
+                "--deflicker/--half-vfilter/--remove-dithering are Wii-only and ignored for GameCube"
+            );
+        }
+        let unused = wii_only_flags_given(&cli);
+        if !unused.is_empty() {
+            log::warn!(
+                "{} {} Wii-only and ignored for GameCube input",
+                unused.join(", "),
+                if unused.len() == 1 { "is" } else { "are" }
+            );
+        }
+    } else {
+        let unused = gc_only_flags_given(&cli);
+        if !unused.is_empty() {
+            log::warn!(
+                "{} {} GameCube-only and ignored for Wii input",
+                unused.join(", "),
+                if unused.len() == 1 { "is" } else { "are" }
+            );
+        }
+    }
+
+    let gamecube = if is_gamecube {
+        Some(build_gc_options(&cli)?)
+    } else {
+        None
+    };
+
+    let config = config_from_cli(cli, base, wiiu_common_key, cert, gamecube);
 
     let summary = pipeline::run(config, &work_path)?;
 
@@ -604,5 +727,189 @@ mod work_dir_tests {
         std::fs::create_dir(dir.path().join("content")).unwrap();
         let err = prepare_work_dir(dir.path()).unwrap_err();
         assert!(err.to_string().contains("not empty"));
+    }
+}
+
+#[cfg(test)]
+mod gc_disc_id_tests {
+    use super::parse_gc_disc_id;
+
+    #[test]
+    fn accepts_six_ascii_alphanumeric_chars() {
+        assert_eq!(parse_gc_disc_id("CEMU69").unwrap(), *b"CEMU69");
+    }
+
+    #[test]
+    fn rejects_too_short() {
+        assert!(parse_gc_disc_id("ABC").is_err());
+    }
+
+    #[test]
+    fn rejects_six_bytes_that_are_only_three_multibyte_chars() {
+        // "Ä" is 2 UTF-8 bytes each, so this is 6 bytes but only 3 characters, and none of the
+        // bytes are ASCII alphanumeric — exactly the case a bare `<[u8; 6]>::try_from` would miss.
+        let id = "ÄÄÄ";
+        assert_eq!(id.len(), 6);
+        assert!(parse_gc_disc_id(id).is_err());
+    }
+
+    #[test]
+    fn rejects_non_alphanumeric_ascii() {
+        assert!(parse_gc_disc_id("abc-12").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ignored_flag_tests {
+    use super::{gc_only_flags_given, wii_only_flags_given, Cli};
+    use clap::Parser;
+
+    fn parse(extra: &[&str]) -> Cli {
+        let mut argv = vec![
+            "wiivci",
+            "-i",
+            "game.rvz",
+            "-b",
+            "base.wua",
+            "-o",
+            "out",
+            "--wiiu-common-key",
+            "00000000000000000000000000000000",
+            "--cert",
+            "title.cert",
+        ];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("argv must parse")
+    }
+
+    #[test]
+    fn no_flags_given_reports_nothing() {
+        let cli = parse(&[]);
+        assert!(gc_only_flags_given(&cli).is_empty());
+        assert!(wii_only_flags_given(&cli).is_empty());
+    }
+
+    #[test]
+    fn gc_only_flags_detected_for_wii_input() {
+        let cli = parse(&["--widescreen", "--cheats", "x"]);
+        assert_eq!(gc_only_flags_given(&cli), vec!["--widescreen", "--cheats"]);
+    }
+
+    #[test]
+    fn wii_only_flags_detected_for_gc_input() {
+        let cli = parse(&["--trim-zeros"]);
+        assert_eq!(wii_only_flags_given(&cli), vec!["--trim-zeros"]);
+    }
+}
+
+#[cfg(test)]
+mod config_from_cli_tests {
+    use std::path::{Path, PathBuf};
+
+    use clap::Parser;
+
+    use wiivci_core::base::{BaseSource, StagedBase};
+    use wiivci_core::package::cert::EXPECTED_CERT_LEN;
+    use wiivci_core::{Error, Result as CoreResult};
+
+    use super::{build_gc_options, config_from_cli, CertChain, Cli, WiiUCommonKey};
+
+    /// A [`BaseSource`] that's never actually called — `config_from_cli` only moves the box
+    /// around, so its methods just need to exist to satisfy the trait object.
+    struct NullBase;
+
+    impl BaseSource for NullBase {
+        fn stage(&mut self, _build_dir: &Path) -> CoreResult<StagedBase> {
+            Err(Error::Other(anyhow::anyhow!(
+                "NullBase::stage must not be called by config_from_cli"
+            )))
+        }
+
+        fn materialize_original_nfs(&mut self, _dest: &Path) -> CoreResult<Option<PathBuf>> {
+            Err(Error::Other(anyhow::anyhow!(
+                "NullBase::materialize_original_nfs must not be called by config_from_cli"
+            )))
+        }
+    }
+
+    fn fake_key() -> WiiUCommonKey {
+        WiiUCommonKey([0u8; 16])
+    }
+
+    fn fake_cert() -> CertChain {
+        CertChain(vec![0u8; EXPECTED_CERT_LEN])
+    }
+
+    fn parse(extra: &[&str]) -> Cli {
+        let mut argv = vec![
+            "wiivci",
+            "-i",
+            "game.rvz",
+            "-b",
+            "base.wua",
+            "-o",
+            "out",
+            "--wiiu-common-key",
+            "00000000000000000000000000000000",
+            "--cert",
+            "title.cert",
+        ];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("argv must parse")
+    }
+
+    #[test]
+    fn positive_defaults_carry_through_unset() {
+        let cli = parse(&[]);
+        let config = config_from_cli(cli, Box::new(NullBase), fake_key(), fake_cert(), None);
+        assert!(config.gamepad);
+        assert!(config.online);
+        assert!(config.skip_gaps);
+        assert!(!config.trim_zeros);
+    }
+
+    #[test]
+    fn no_gamepad_inverts_to_gamepad_false() {
+        let cli = parse(&["--no-gamepad"]);
+        let config = config_from_cli(cli, Box::new(NullBase), fake_key(), fake_cert(), None);
+        assert!(!config.gamepad);
+    }
+
+    #[test]
+    fn offline_inverts_to_online_false() {
+        let cli = parse(&["--offline"]);
+        let config = config_from_cli(cli, Box::new(NullBase), fake_key(), fake_cert(), None);
+        assert!(!config.online);
+    }
+
+    #[test]
+    fn keep_gaps_inverts_to_skip_gaps_false() {
+        let cli = parse(&["--keep-gaps"]);
+        let config = config_from_cli(cli, Box::new(NullBase), fake_key(), fake_cert(), None);
+        assert!(!config.skip_gaps);
+    }
+
+    #[test]
+    fn trim_zeros_sets_trim_zeros_true() {
+        let cli = parse(&["--trim-zeros"]);
+        let config = config_from_cli(cli, Box::new(NullBase), fake_key(), fake_cert(), None);
+        assert!(config.trim_zeros);
+    }
+
+    #[test]
+    fn no_memcard_inverts_to_memcard_emu_false() {
+        // GameCubeOptions::memcard_emu isn't part of Config, so exercise build_gc_options
+        // directly. A stub dol file avoids the network download build_gc_options would otherwise
+        // attempt.
+        let dol = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(dol.path(), b"stub dol").unwrap();
+        let cli = parse(&[
+            "--gamecube",
+            "--nintendont",
+            dol.path().to_str().unwrap(),
+            "--no-memcard",
+        ]);
+        let opts = build_gc_options(&cli).expect("stub dol avoids the network");
+        assert!(!opts.memcard_emu);
     }
 }

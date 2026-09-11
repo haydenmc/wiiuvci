@@ -23,7 +23,11 @@ cargo clippy --all-targets --all-features      # keep at 0 warnings
 cargo test --workspace --release               # fast tests; needs no fixtures/keys
 ```
 
-`cargo` may not be on `PATH` in a fresh shell — `source "$HOME/.cargo/env"` first.
+`cargo` is already on `PATH` in this devcontainer (`/usr/local/cargo/bin`); in a fresh shell where
+it isn't, `source "$HOME/.cargo/env"` first.
+
+CI (`.github/workflows/ci.yml`) runs the same test suite in **debug** mode (overflow checks catch
+real bugs there), not `--release` — the local gate above uses `--release` purely for speed.
 
 ## The prime directive: byte-identity
 

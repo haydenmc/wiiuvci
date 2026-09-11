@@ -39,5 +39,26 @@ jobs:
 
       # Runs only the hermetic tests: the retail/NUS end-to-end tests are #[ignore]d,
       # and fixture-gated tests no-op when .dev/ is absent (as it is on a clean checkout).
+      # Deliberately debug-mode (not --release): overflow checks are only active there, and
+      # this suite is fast enough that the slower binary doesn't matter (see CLAUDE.md).
       - name: Test
         run: cargo test --workspace --locked
+
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The workspace declares rust-version = "1.85" (Cargo.toml); verify it still builds on
+      # exactly that toolchain, since the `test` job above only proves `stable` works.
+      - name: Install Rust 1.85 toolchain
+        uses: dtolnay/rust-toolchain@1.85
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
