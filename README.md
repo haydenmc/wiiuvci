@@ -9,8 +9,9 @@ dependency on external tools** (`wit`, `nfs2iso2nfs`, `NUSPacker`, `CDecrypt`, `
 …). Optional network calls are used only to look up a title string and cover art.
 
 > **Status:** the entire WUP format pipeline is implemented and validated byte-for-byte
-> against a retail title (see [Validation](#validation)). Final confirmation of a booting
-> title still requires installing on real hardware.
+> against a retail title (see [Validation](#validation)). Wii injects and GameCube (Nintendont)
+> injects built with the default options have been confirmed to install and boot on real
+> hardware.
 
 ## What you provide
 
@@ -100,14 +101,31 @@ Wii disc whose `main.dol` is **Nintendont** and whose filesystem holds the GameC
 is used as for Wii injects.
 
 Alongside the WUP package the tool writes a **`nincfg.bin`** (Nintendont's config) next to the
-output — **copy it to your SD card root**. Options that shape it: `--widescreen`, `--gc-language`,
-`--no-memcard`, and `--cheats <sd-path-to-.gct>`.
+output — **copy it to your SD card root** (it is a 548-byte `NIN_CFG` v10 record; Nintendont
+silently ignores a config of any other size and drops to its menu instead of autobooting). Options that shape it: `--widescreen`, `--gc-language`,
+`--gc-video <auto|ntsc|pal50|pal60|mpal|progressive|none>`, `--no-memcard`,
+`--gc-memcard-blocks <59|123|251|507|1019>`, `--gc-max-pads <0-4>`, `--gc-gamepad-slot <0-3>`,
+and `--cheats <sd-path-to-.gct>`.
+
+> **These settings are effectively global.** Nintendont reads the one `nincfg.bin` at the SD-card
+> root for *every* GC inject — the game itself always comes from the launched title (`di:/game.iso`),
+> but the settings from the most recently copied `nincfg.bin` apply to **all** installed GameCube
+> titles. If different games need different settings, keep per-game copies and swap the active one.
 
 Nintendont's `boot.dol` is downloaded automatically (a pinned build); supply your own with
 `--nintendont <boot.dol>` (required with `--offline`). Booting on real hardware also needs a Wii
-**apploader** in the synthetic disc — supply one with `--apploader <apploader.img>` (e.g. the
-open-source [HackMii/gc-linux apploader](https://hackmii.com/2008/08/open-source-apploader-iso-template/)).
-Without it the package is structurally valid (and verifies against `nod`) but will not boot.
+**apploader** in the synthetic disc — by default the genuine one is **extracted from the base
+title's own game disc** (a `.wua` or NUS base carries the original VC game's NFS; an
+already-stripped base directory does not, in which case a warning is printed). Override with
+`--apploader <apploader.img>` (e.g. one extracted from a Wii disc you own, or the open-source
+[HackMii/gc-linux apploader](https://hackmii.com/2008/08/open-source-apploader-iso-template/)).
+Without an apploader the package is structurally valid (and verifies against `nod`) but will not
+boot.
+
+`--gc-disc-id <ID6>` / `--gc-disc-title <STR>` override the synthetic carrier disc's own id and
+header title (default: the game's id and `--title`). The known-good TeconMoon carrier disc is
+`CEMU69` / `PunEmu 1.1`; the `gc_template_extract` example pulls that disc's apploader, forwarder
+and ids out of an existing TeconMoon GameCube inject so they can be replayed here.
 
 Nintendont handles video, controllers and widescreen, so the Wii `--deflicker`/`--half-vfilter`/
 `--remove-dithering` patches do not apply to GameCube titles.

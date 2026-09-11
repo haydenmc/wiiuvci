@@ -2,8 +2,19 @@
   "image": "mcr.microsoft.com/devcontainers/base:trixie",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {},
-    "ghcr.io/devcontainers/features/rust:1": {},
-    "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+    "ghcr.io/devcontainers/features/rust:1": {}
+  },
+  // Claude Code is installed with the native installer as the container user
+  // (into ~/.local/bin) rather than via the claude-code devcontainer feature.
+  // The feature does `npm install -g` as root, which leaves the install dir
+  // root-owned and not group-writable, so `claude update` / auto-update fails
+  // with EACCES for the non-root remote user
+  // (https://github.com/anthropics/devcontainer-features/issues/27).
+  "postCreateCommand": "curl -fsSL https://claude.ai/install.sh | bash",
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code"]
+    }
   },
   // Rootless Podman on an SELinux host (Fedora):
   //   * keep-id preserves the host uid (1000) inside the container so it lines up

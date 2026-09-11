@@ -6,12 +6,20 @@
 //! — we generate it alongside the output so the user can drop it on their SD card.
 //!
 //! The layout mirrors Nintendont's `NIN_CFG` struct (`common/include/CommonConfig.h`, config
-//! version 10). It is a fixed 546-byte (`0x222`) record; all multi-byte integers are **big-endian**
+//! version 10). It is a fixed 548-byte (`0x224`) record; all multi-byte integers are **big-endian**
 //! (Nintendont runs on the PowerPC Wii/vWii and byteswaps against that native order). We target
 //! `di:/game.iso`, i.e. the game read from the emulated disc rather than USB/SD.
+//!
+//! **The struct is not packed.** The two 255-byte path arrays end at 0x212, so the C compiler
+//! pads two bytes before the next `unsigned int` (`MaxPads` at 0x214, `GameID` at 0x218, …,
+//! `WiiUGamepadSlot` at 0x220, `sizeof(NIN_CFG)` = 0x224). Nintendont's own loader confirms this:
+//! it expects a version-2 file (which ends after `GameID`) to be exactly 540 = 0x21C bytes. A
+//! packed 546-byte record puts `MaxPads` two bytes early, so the loader reads it as garbage
+//! (`> NIN_CFG_MAXPAD`), rejects the forwarder-passed config, and drops to its menu instead of
+//! autobooting — which is exactly what a GameCube inject built before this fix did on hardware.
 
-/// Total size of a version-10 `NIN_CFG` record.
-pub const NINCFG_SIZE: usize = 0x222;
+/// Total size of a version-10 `NIN_CFG` record (`sizeof(NIN_CFG)`, natural alignment).
+pub const NINCFG_SIZE: usize = 0x224;
 
 /// Config version this generator emits (`NIN_CFG` v10, which adds `WiiUGamepadSlot`).
 const NINCFG_VERSION: u32 = 0x0000_000A;
@@ -26,13 +34,14 @@ const OFF_VIDEOMODE: usize = 0x00C;
 const OFF_LANGUAGE: usize = 0x010;
 const OFF_GAMEPATH: usize = 0x014; // char[255]
 const OFF_CHEATPATH: usize = 0x113; // char[255]
-const OFF_MAXPADS: usize = 0x212;
-const OFF_GAMEID: usize = 0x216; // 4 ASCII bytes
-const OFF_MEMCARDBLOCKS: usize = 0x21A;
-const OFF_VIDEOSCALE: usize = 0x21B;
-const OFF_VIDEOOFFSET: usize = 0x21C;
-const OFF_NETWORKPROFILE: usize = 0x21D;
-const OFF_WIIU_GAMEPAD_SLOT: usize = 0x21E;
+                                    // 0x212..0x214: alignment padding (see the module docs).
+const OFF_MAXPADS: usize = 0x214;
+const OFF_GAMEID: usize = 0x218; // 4 ASCII bytes
+const OFF_MEMCARDBLOCKS: usize = 0x21C;
+const OFF_VIDEOSCALE: usize = 0x21D;
+const OFF_VIDEOOFFSET: usize = 0x21E;
+const OFF_NETWORKPROFILE: usize = 0x21F;
+const OFF_WIIU_GAMEPAD_SLOT: usize = 0x220;
 
 const PATH_LEN: usize = 255;
 
@@ -165,7 +174,7 @@ impl Default for NincfgOptions {
 /// The disc path Nintendont reads the game from on a Wii U VC inject (the emulated disc).
 const GAME_PATH: &str = "di:/game.iso";
 
-/// Serialize `opts` into a 546-byte `nincfg.bin` record.
+/// Serialize `opts` into a 548-byte `nincfg.bin` record.
 pub fn generate(opts: &NincfgOptions) -> [u8; NINCFG_SIZE] {
     let mut buf = [0u8; NINCFG_SIZE];
 
@@ -223,10 +232,39 @@ mod tests {
     }
 
     #[test]
-    fn record_is_exactly_546_bytes() {
-        assert_eq!(NINCFG_SIZE, 546);
+    fn record_is_exactly_548_bytes() {
+        // sizeof(NIN_CFG) with natural alignment; Nintendont's loader rejects any other length.
+        assert_eq!(NINCFG_SIZE, 548);
         let cfg = generate(&NincfgOptions::default());
-        assert_eq!(cfg.len(), 546);
+        assert_eq!(cfg.len(), 548);
+    }
+
+    /// The tail fields sit at the C-aligned offsets Nintendont reads them from. Byte-pin them
+    /// individually so a packed-layout regression cannot slip through: with `MaxPads` two bytes
+    /// early the loader reads it as `0x0004xxxx` (> NIN_CFG_MAXPAD) and ignores the whole config.
+    #[test]
+    fn tail_fields_use_the_unpacked_c_layout() {
+        let cfg = generate(&NincfgOptions {
+            game_id: *b"GBOE",
+            max_pads: 4,
+            memcard_blocks: 2,
+            wiiu_gamepad_slot: 1,
+            ..Default::default()
+        });
+        assert_eq!(
+            &cfg[0x212..0x214],
+            &[0, 0],
+            "alignment padding after CheatPath"
+        );
+        assert_eq!(&cfg[0x214..0x218], &[0, 0, 0, 4], "MaxPads");
+        assert_eq!(&cfg[0x218..0x21C], b"GBOE", "GameID");
+        assert_eq!(cfg[0x21C], 2, "MemCardBlocks");
+        assert_eq!(
+            &cfg[0x21D..0x220],
+            &[0, 0, 0],
+            "VideoScale/VideoOffset/NetworkProfile"
+        );
+        assert_eq!(&cfg[0x220..0x224], &[0, 0, 0, 1], "WiiUGamepadSlot");
     }
 
     #[test]

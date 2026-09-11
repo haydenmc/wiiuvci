@@ -26,8 +26,12 @@ pub struct MetaOptions<'a> {
     pub publisher: &'a str,
     /// Region flags, e.g. `2` for USA.
     pub region: u32,
-    /// Whether the Wii U GamePad screen is used.
-    pub drc_use: bool,
+    /// `meta.xml` `drc_use` value. Bit 0 = the title uses the GamePad screen; bit 16 (`0x10000`)
+    /// = the GamePad is exposed as a *controller* to the vWii title. A Wii inject uses the GamePad
+    /// only as a pointer (`1`, or `0` when disabled); a GameCube/Nintendont inject drives the game
+    /// with the GamePad and so must set bit 16 (`0x10001`, or `1` when disabled), matching the
+    /// reference injector — otherwise vWii never hands Nintendont the GamePad.
+    pub drc_use: u32,
 }
 
 fn replacement_for(name: &str, opts: &MetaOptions) -> Option<String> {
@@ -36,7 +40,7 @@ fn replacement_for(name: &str, opts: &MetaOptions) -> Option<String> {
         "title_id" => Some(format!("{:016X}", opts.ids.title_id)),
         "group_id" => Some(format!("{:08X}", opts.ids.group_id)),
         "region" => Some(format!("{:08X}", opts.region)),
-        "drc_use" => Some(if opts.drc_use { "1" } else { "0" }.to_string()),
+        "drc_use" => Some(opts.drc_use.to_string()),
         "reserved_flag2" => Some(format!("{:08X}", opts.ids.reserved_flag2)),
         _ => {
             for lang in LANGS {
@@ -235,7 +239,7 @@ mod tests {
             short_name: "Rhythm Heaven",
             publisher: "Nintendo",
             region: 2,
-            drc_use: true,
+            drc_use: 1,
         };
 
         let patched = patch(&base, &opts).expect("patch succeeds");
@@ -288,7 +292,7 @@ mod tests {
             short_name: "Y",
             publisher: "Z",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let patched = patch(&base, &opts).expect("patch succeeds");
@@ -328,7 +332,7 @@ mod tests {
             short_name: "",
             publisher: "",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let patched = patch(FIXTURE, &opts).expect("patch succeeds");
@@ -351,7 +355,7 @@ mod tests {
             short_name: "Short",
             publisher: "",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let patched = patch(FIXTURE, &opts).expect("patch succeeds");
@@ -376,7 +380,7 @@ mod tests {
             short_name: "",
             publisher: "",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let patched = patch(FIXTURE, &opts).expect("valid hexBinary value must be accepted");
@@ -394,7 +398,7 @@ mod tests {
             short_name: "",
             publisher: "",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let err = patch(FIXTURE, &opts).expect_err("over-length value must be rejected");
@@ -419,7 +423,7 @@ mod tests {
             short_name: "",
             publisher: "",
             region: 2,
-            drc_use: false,
+            drc_use: 0,
         };
 
         let patched = patch(FIXTURE, &opts).expect("value at the exact limit must be accepted");

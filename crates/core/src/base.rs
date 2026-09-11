@@ -50,9 +50,24 @@ pub trait BaseSource {
     /// Stage the base's `code/`, `content/` and `meta/` trees into `build_dir`, skipping the
     /// base's own `hif_*.nfs` game data. `build_dir` must already exist.
     fn stage(&mut self, build_dir: &Path) -> Result<StagedBase>;
+
+    /// Materialize the base's **original** `hif_*.nfs` game disc (which [`stage`] deliberately
+    /// skips) somewhere `nod`'s NFS reader can open it, and return the directory holding the
+    /// `hif_*.nfs` files. The returned layout must let `nod` find the AES key at
+    /// `<dir>/../code/htk.bin` or `<dir>/htk.bin`.
+    ///
+    /// `dest` is scratch space the implementation may (but need not) populate — a source that
+    /// already has the files on disk can return its own directory instead. Returns `Ok(None)`
+    /// when the source has no original NFS (e.g. an already-stripped directory base).
+    ///
+    /// Used by the GameCube path to recover the base game's genuine apploader (see
+    /// [`crate::apploader`]).
+    ///
+    /// [`stage`]: BaseSource::stage
+    fn materialize_original_nfs(&mut self, dest: &Path) -> Result<Option<PathBuf>>;
 }
 
-fn is_base_game_nfs(name: &str) -> bool {
+pub(crate) fn is_base_game_nfs(name: &str) -> bool {
     name.starts_with("hif_") && name.ends_with(".nfs")
 }
 
@@ -196,6 +211,19 @@ impl WuaBase {
     }
 }
 
+impl WuaBase {
+    /// Handle of the named directory directly under the title root, if present.
+    fn title_subdir(&self, name: &str) -> Result<Option<NodeHandle>> {
+        Ok(self
+            .reader
+            .directory_entries(self.title_root)
+            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .into_iter()
+            .find(|e| e.is_directory() && e.name == name.as_bytes())
+            .map(|e| e.handle))
+    }
+}
+
 impl BaseSource for WuaBase {
     fn stage(&mut self, build_dir: &Path) -> Result<StagedBase> {
         let title_root = self.title_root;
@@ -213,6 +241,61 @@ impl BaseSource for WuaBase {
             self.copy_dir(handle, &build_dir.join(&name))?;
         }
         finalize_stage(build_dir)
+    }
+
+    fn materialize_original_nfs(&mut self, dest: &Path) -> Result<Option<PathBuf>> {
+        let Some(content) = self.title_subdir("content")? else {
+            return Ok(None);
+        };
+        let hifs: Vec<(String, NodeHandle)> = self
+            .reader
+            .directory_entries(content)
+            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .into_iter()
+            .filter(|e| {
+                e.kind == EntryKind::File && is_base_game_nfs(&String::from_utf8_lossy(e.name))
+            })
+            .map(|e| (String::from_utf8_lossy(e.name).into_owned(), e.handle))
+            .collect();
+        if !hifs.iter().any(|(name, _)| name == "hif_000000.nfs") {
+            return Ok(None);
+        }
+
+        let content_dir = dest.join("content");
+        fs::create_dir_all(&content_dir).map_err(|e| Error::io(&content_dir, e))?;
+        for (name, handle) in hifs {
+            let path = safe_join(&content_dir, &name)?;
+            let data = self
+                .reader
+                .read_file_to_end(handle)
+                .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+            fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
+        }
+
+        // The NFS key, where nod looks for it (`<content>/../code/htk.bin`).
+        let Some(code) = self.title_subdir("code")? else {
+            return Ok(None);
+        };
+        let Some(htk) = self
+            .reader
+            .directory_entries(code)
+            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .into_iter()
+            .find(|e| e.kind == EntryKind::File && e.name == b"htk.bin")
+            .map(|e| e.handle)
+        else {
+            return Ok(None);
+        };
+        let code_dir = dest.join("code");
+        fs::create_dir_all(&code_dir).map_err(|e| Error::io(&code_dir, e))?;
+        let htk_bytes = self
+            .reader
+            .read_file_to_end(htk)
+            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+        let htk_path = code_dir.join("htk.bin");
+        fs::write(&htk_path, htk_bytes).map_err(|e| Error::io(&htk_path, e))?;
+
+        Ok(Some(content_dir))
     }
 }
 
@@ -265,6 +348,18 @@ impl BaseSource for DirBase {
             }
         }
         finalize_stage(build_dir)
+    }
+
+    fn materialize_original_nfs(&mut self, _dest: &Path) -> Result<Option<PathBuf>> {
+        // Everything is already on disk in the right layout (`content/hif_*.nfs` beside
+        // `code/htk.bin`) — hand out our own directory, no copying. A base dir that was itself
+        // produced by staging has no hif files and yields `None`.
+        let content = self.root.join("content");
+        if content.join("hif_000000.nfs").is_file() && self.root.join("code/htk.bin").is_file() {
+            Ok(Some(content))
+        } else {
+            Ok(None)
+        }
     }
 }
 

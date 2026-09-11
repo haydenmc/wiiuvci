@@ -111,8 +111,22 @@ pub struct GameCubeOptions {
     pub video_mode: nincfg::VideoMode,
     /// Emulate a memory card.
     pub memcard_emu: bool,
+    /// Memory-card size exponent (`nincfg.bin` `MemCardBlocks`, `0..=4`; `2` ⇒ 251 blocks, the
+    /// standard 512 KiB card). See [`nincfg::NincfgOptions::memcard_blocks`].
+    pub memcard_blocks: u8,
+    /// Maximum number of controllers (`0..=4`).
+    pub max_pads: u32,
+    /// Controller slot the Wii U GamePad occupies (`0..=3`).
+    pub wiiu_gamepad_slot: u32,
     /// Optional Gecko cheat file path (on SD) recorded in `nincfg.bin`.
     pub cheat_path: Option<String>,
+    /// Override the synthetic carrier disc's 6-character disc id (and the Wii disc title id
+    /// derived from its first four characters). Defaults to the GameCube game's own id. The
+    /// reference TeconMoon carrier disc is `CEMU69`.
+    pub disc_id: Option<[u8; 6]>,
+    /// Override the carrier disc's header title string. Defaults to `--title` / the game id. The
+    /// reference carrier disc is `PunEmu 1.1`.
+    pub disc_title: Option<String>,
 }
 
 /// Result of an injection.
@@ -202,7 +216,7 @@ pub fn run(mut config: Config, work_dir: &Path) -> Result<Summary> {
 /// `files/game.iso`), then reuse the Wii pipeline's NFS/packaging back half. Also emits an
 /// `nincfg.bin` next to the output for the user's SD card.
 fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
-    let gc_opts = config
+    let mut gc_opts = config
         .gamecube
         .take()
         .expect("run() dispatches here only when gamecube options are present");
@@ -219,24 +233,75 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     let staged = config.base.stage(work_dir)?;
 
     // 2. Author the synthetic Wii disc (Nintendont as main.dol + the GameCube image as game.iso).
-    if gc_opts.apploader.is_empty() {
-        log::warn!(
-            "no apploader supplied: the package will validate but will NOT boot on hardware \
-             (supply one with --apploader)"
-        );
+    // The synthetic disc needs two things a GameCube source disc can't provide but the base
+    // title's own Wii game disc can: the Wii certificate chain (always — the vWii framework needs
+    // it to validate the fakesigned ticket/TMD) and, unless --apploader was given, a real Wii
+    // apploader. Both come from the base's `content/hif_*.nfs`, materialized once here. The
+    // reference tools inherit both the same way, by rebuilding the base's own disc.
+    let mut cert_chain: Vec<u8> = Vec::new();
+    {
+        let nfs_scratch = work_dir.join("base_nfs");
+        match config.base.materialize_original_nfs(&nfs_scratch) {
+            Ok(Some(dir)) => {
+                match crate::apploader::extract_cert_chain_from_nfs(&dir) {
+                    Ok(c) => {
+                        log::info!(
+                            "using the Wii cert chain from the base disc ({} bytes)",
+                            c.len()
+                        );
+                        cert_chain = c;
+                    }
+                    Err(e) => log::warn!(
+                        "no cert chain: reading it from the base disc failed ({e}) — the package \
+                         will validate but will NOT boot on hardware"
+                    ),
+                }
+                if gc_opts.apploader.is_empty() {
+                    match crate::apploader::extract_from_nfs(&dir) {
+                        Ok(app) => {
+                            log::info!(
+                                "using the apploader from the base title's own game disc \
+                                 ({} bytes, {}, entry {:#010x})",
+                                app.bytes.len(),
+                                app.date,
+                                app.entry
+                            );
+                            gc_opts.apploader = app.bytes;
+                        }
+                        Err(e) => log::warn!(
+                            "no apploader: extracting one from the base failed ({e}) — the \
+                             package will validate but will NOT boot on hardware (supply one \
+                             with --apploader)"
+                        ),
+                    }
+                }
+            }
+            Ok(None) => log::warn!(
+                "the base has no original game disc to take the cert chain / apploader from — \
+                 the package will validate but will NOT boot on hardware"
+            ),
+            Err(e) => log::warn!("could not read the base's original game disc ({e})"),
+        }
+        // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
+        let _ = std::fs::remove_dir_all(&nfs_scratch);
     }
-    let disc_title = config.title.clone().unwrap_or_else(|| game_id.clone());
+    let disc_title = gc_opts
+        .disc_title
+        .clone()
+        .or_else(|| config.title.clone())
+        .unwrap_or_else(|| game_id.clone());
+    let disc_id = gc_opts.disc_id.unwrap_or_else(|| gc.game_id());
     let disc_path = work_dir.join("gc_disc.img");
     log::info!(
         "authoring synthetic Wii disc (embedding {} MiB game.iso)…",
         iso_size / (1024 * 1024)
     );
     let inputs = GcDiscInputs {
-        game_id: gc.game_id(),
+        game_id: disc_id,
         disc_title: &disc_title,
         main_dol: &gc_opts.nintendont_dol,
         apploader: &gc_opts.apploader,
-        title_id: ids.title_id,
+        cert_chain: &cert_chain,
     };
     let mut authored = wii_author::author_gc_disc(gc.iso_stream(), iso_size, &inputs, &disc_path)?;
 
@@ -294,8 +359,10 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
                 language: gc_opts.language,
                 video_mode: gc_opts.video_mode,
                 memcard_emu: gc_opts.memcard_emu,
+                memcard_blocks: gc_opts.memcard_blocks,
+                max_pads: gc_opts.max_pads,
+                wiiu_gamepad_slot: gc_opts.wiiu_gamepad_slot,
                 cheat_path: gc_opts.cheat_path.clone(),
-                ..Default::default()
             });
             // Resolve --out to an absolute path first: a bare relative `--out` (e.g. `MyGame`,
             // with no parent component) would otherwise leave `parent()` ambiguous, landing
@@ -315,12 +382,29 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
             }
             std::fs::write(&nincfg_path, nincfg).map_err(|e| Error::io(&nincfg_path, e))?;
             log::info!(
-                "wrote {} — copy it to your SD card root for Nintendont",
+                "wrote {} — copy it to your SD card root for Nintendont. Note: Nintendont reads \
+                 this ONE file for every GC inject, so its settings (widescreen, language, video \
+                 mode, memory card, cheats, pads) apply to ALL installed GameCube titles",
                 nincfg_path.display()
             );
             Ok(())
         },
     )
+}
+
+/// The `meta.xml` `drc_use` value for a platform. A Wii inject exposes the GamePad only as a
+/// pointer (`1`), or not at all (`0`). A GameCube/Nintendont inject drives the emulated game with
+/// the GamePad, so it must also set bit 16 (`0x10000`) — "GamePad usable as a controller in vWii" —
+/// giving `0x10001` (and `1` when the GamePad is disabled). This mirrors the reference injector,
+/// which writes `65537` for GameCube and `1` for Wii; without bit 16, vWii never hands Nintendont
+/// the GamePad. `textures_key` is `"gcn"` on the GameCube path and `"wii"` on the Wii path.
+fn drc_use_value(textures_key: &str, gamepad: bool) -> u32 {
+    match (textures_key, gamepad) {
+        ("gcn", true) => 0x0001_0001,
+        ("gcn", false) => 1,
+        (_, true) => 1,
+        (_, false) => 0,
+    }
 }
 
 /// Shared tail of both injection paths: regenerate `app.xml`/`meta.xml`, resolve the boot
@@ -354,7 +438,7 @@ fn finish_package(
             short_name: &title,
             publisher: "",
             region: config.region.code(),
-            drc_use: config.gamepad,
+            drc_use: drc_use_value(textures_key, config.gamepad),
         },
     )?;
     std::fs::write(&meta_path, patched).map_err(|e| Error::io(&meta_path, e))?;
@@ -468,6 +552,16 @@ fn update_rvlt_tmd(tmd: &mut [u8], content_hash: &[u8; 20]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drc_use_is_gamepad_controller_on_gamecube_only() {
+        // GameCube drives the game with the GamePad, so it sets bit 16 (0x10001); Wii uses it only
+        // as a pointer (1). Disabling the GamePad drops to 1 (GC) / 0 (Wii).
+        assert_eq!(drc_use_value("gcn", true), 0x0001_0001);
+        assert_eq!(drc_use_value("gcn", false), 1);
+        assert_eq!(drc_use_value("wii", true), 1);
+        assert_eq!(drc_use_value("wii", false), 0);
+    }
 
     #[test]
     fn drc_uses_own_art_when_present() {

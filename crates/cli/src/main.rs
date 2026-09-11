@@ -113,33 +113,108 @@ struct Cli {
     #[arg(long)]
     gamecube: bool,
 
-    /// GameCube: Nintendont `boot.dol` to embed (default: downloaded, pinned build).
+    /// GameCube: Nintendont autoboot-forwarder `.dol` to use as the disc's main.dol
+    /// (default: downloaded, pinned FIX94 forwarder). Nintendont itself must be on the SD card.
     #[arg(long, value_name = "DOL")]
     nintendont: Option<PathBuf>,
 
-    /// GameCube: Wii `apploader.img` for the synthetic disc. Required to boot on hardware.
+    /// GameCube: Wii `apploader.img` for the synthetic disc (default: extracted from the base
+    /// title's own game disc).
     #[arg(long, value_name = "IMG")]
     apploader: Option<PathBuf>,
 
-    /// GameCube: force 16:9 widescreen (written to nincfg.bin).
-    #[arg(long)]
+    /// GameCube: 6-character id of the synthetic carrier disc (default: the game's own id; the
+    /// reference TeconMoon carrier disc uses CEMU69).
+    #[arg(long, value_name = "ID6")]
+    gc_disc_id: Option<String>,
+
+    /// GameCube: header title string of the synthetic carrier disc (default: --title; the
+    /// reference TeconMoon carrier disc uses "PunEmu 1.1").
+    #[arg(long, value_name = "STR")]
+    gc_disc_title: Option<String>,
+
+    /// Force 16:9 widescreen.
+    #[arg(long, help_heading = GC_NINCFG_HEADING)]
     widescreen: bool,
 
-    /// GameCube: game language (written to nincfg.bin).
-    #[arg(long, value_enum, default_value_t = GcLangArg::Auto)]
+    /// Game language.
+    #[arg(long, value_enum, default_value_t = GcLangArg::Auto, help_heading = GC_NINCFG_HEADING)]
     gc_language: GcLangArg,
 
-    /// GameCube: disable emulated memory card.
-    #[arg(long)]
+    /// Forced video mode (`progressive` = 480p).
+    #[arg(long, value_enum, default_value_t = GcVideoArg::Auto, help_heading = GC_NINCFG_HEADING)]
+    gc_video: GcVideoArg,
+
+    /// Disable emulated memory card.
+    #[arg(long, help_heading = GC_NINCFG_HEADING)]
     no_memcard: bool,
 
-    /// GameCube: SD path to a Gecko cheat file (`.gct`); enables cheats in nincfg.bin.
-    #[arg(long, value_name = "SDPATH")]
+    /// Emulated memory-card size in blocks: 59, 123, 251, 507 or 1019.
+    #[arg(long, value_name = "BLOCKS", default_value = "251",
+          value_parser = parse_memcard_size, help_heading = GC_NINCFG_HEADING)]
+    gc_memcard_blocks: u8,
+
+    /// Maximum number of controllers.
+    #[arg(long, value_name = "N", default_value_t = 4,
+          value_parser = clap::value_parser!(u32).range(0..=4), help_heading = GC_NINCFG_HEADING)]
+    gc_max_pads: u32,
+
+    /// Controller slot the Wii U GamePad occupies.
+    #[arg(long, value_name = "SLOT", default_value_t = 0,
+          value_parser = clap::value_parser!(u32).range(0..=3), help_heading = GC_NINCFG_HEADING)]
+    gc_gamepad_slot: u32,
+
+    /// SD path to a Gecko cheat file (`.gct`); enables cheats.
+    #[arg(long, value_name = "SDPATH", help_heading = GC_NINCFG_HEADING)]
     cheats: Option<String>,
 
     /// Keep the intermediate build directory instead of deleting it.
     #[arg(long, value_name = "DIR")]
     work_dir: Option<PathBuf>,
+}
+
+/// Help section for the settings written into `nincfg.bin`. Nintendont reads that ONE file from
+/// the SD-card root for every GameCube inject, so these are effectively global — the most
+/// recently copied `nincfg.bin` applies to ALL installed GC titles.
+const GC_NINCFG_HEADING: &str =
+    "GameCube settings (nincfg.bin — shared by EVERY GC inject on the SD card)";
+
+/// Map a Nintendont memory-card size in blocks to the `MemCardBlocks` exponent
+/// (`blocks = (1 << (x + 6)) - 5`).
+fn parse_memcard_size(s: &str) -> std::result::Result<u8, String> {
+    match s {
+        "59" => Ok(0),
+        "123" => Ok(1),
+        "251" => Ok(2),
+        "507" => Ok(3),
+        "1019" => Ok(4),
+        _ => Err("memory-card size must be one of 59, 123, 251, 507 or 1019 blocks".into()),
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum GcVideoArg {
+    Auto,
+    Ntsc,
+    Pal50,
+    Pal60,
+    Mpal,
+    Progressive,
+    None,
+}
+
+impl From<GcVideoArg> for VideoMode {
+    fn from(v: GcVideoArg) -> Self {
+        match v {
+            GcVideoArg::Auto => VideoMode::Auto,
+            GcVideoArg::Ntsc => VideoMode::ForceNtsc,
+            GcVideoArg::Pal50 => VideoMode::ForcePal50,
+            GcVideoArg::Pal60 => VideoMode::ForcePal60,
+            GcVideoArg::Mpal => VideoMode::ForceMpal,
+            GcVideoArg::Progressive => VideoMode::ForceProgressive,
+            GcVideoArg::None => VideoMode::None,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -250,13 +325,24 @@ fn build_gc_options(cli: &Cli) -> Result<GameCubeOptions> {
         }
         None => Vec::new(),
     };
+    let disc_id = match &cli.gc_disc_id {
+        Some(id) => Some(<[u8; 6]>::try_from(id.as_bytes()).map_err(|_| {
+            anyhow!("--gc-disc-id must be exactly 6 ASCII characters (got {id:?})")
+        })?),
+        None => None,
+    };
     Ok(GameCubeOptions {
         nintendont_dol,
         apploader,
+        disc_id,
+        disc_title: cli.gc_disc_title.clone(),
         widescreen: cli.widescreen,
         language: cli.gc_language.into(),
-        video_mode: VideoMode::Auto,
+        video_mode: cli.gc_video.into(),
         memcard_emu: !cli.no_memcard,
+        memcard_blocks: cli.gc_memcard_blocks,
+        max_pads: cli.gc_max_pads,
+        wiiu_gamepad_slot: cli.gc_gamepad_slot,
         cheat_path: cli.cheats.clone(),
     })
 }
@@ -373,6 +459,112 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod gc_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Minimal valid argv; append GC flags per test.
+    fn parse(extra: &[&str]) -> Cli {
+        let mut argv = vec![
+            "wiivci",
+            "-i",
+            "game.rvz",
+            "-b",
+            "base.wua",
+            "-o",
+            "out",
+            "--wiiu-common-key",
+            "00000000000000000000000000000000",
+            "--cert",
+            "title.cert",
+        ];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("argv must parse")
+    }
+
+    #[test]
+    fn nincfg_flag_defaults_match_the_previous_hardcoded_values() {
+        let cli = parse(&[]);
+        assert!(matches!(cli.gc_video, GcVideoArg::Auto));
+        assert_eq!(cli.gc_memcard_blocks, 2, "251 blocks ⇒ exponent 2");
+        assert_eq!(cli.gc_max_pads, 4);
+        assert_eq!(cli.gc_gamepad_slot, 0);
+        assert!(!cli.no_memcard);
+        assert!(!cli.widescreen);
+    }
+
+    #[test]
+    fn nincfg_flags_parse_and_map() {
+        let cli = parse(&[
+            "--gc-video",
+            "progressive",
+            "--gc-memcard-blocks",
+            "1019",
+            "--gc-max-pads",
+            "2",
+            "--gc-gamepad-slot",
+            "1",
+        ]);
+        assert!(matches!(
+            VideoMode::from(cli.gc_video),
+            VideoMode::ForceProgressive
+        ));
+        assert_eq!(cli.gc_memcard_blocks, 4, "1019 blocks ⇒ exponent 4");
+        assert_eq!(cli.gc_max_pads, 2);
+        assert_eq!(cli.gc_gamepad_slot, 1);
+    }
+
+    #[test]
+    fn memcard_size_accepts_only_nintendont_sizes() {
+        for (blocks, exp) in [("59", 0u8), ("123", 1), ("251", 2), ("507", 3), ("1019", 4)] {
+            assert_eq!(parse_memcard_size(blocks).unwrap(), exp);
+        }
+        assert!(parse_memcard_size("512").is_err());
+        assert!(parse_memcard_size("0").is_err());
+        assert!(Cli::try_parse_from([
+            "wiivci",
+            "-i",
+            "g",
+            "-b",
+            "b",
+            "-o",
+            "o",
+            "--wiiu-common-key",
+            "00000000000000000000000000000000",
+            "--cert",
+            "c",
+            "--gc-memcard-blocks",
+            "512"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn out_of_range_pads_and_slot_are_rejected() {
+        for bad in [["--gc-max-pads", "5"], ["--gc-gamepad-slot", "4"]] {
+            let mut argv = vec![
+                "wiivci",
+                "-i",
+                "g",
+                "-b",
+                "b",
+                "-o",
+                "o",
+                "--wiiu-common-key",
+                "00000000000000000000000000000000",
+                "--cert",
+                "c",
+            ];
+            argv.extend_from_slice(&bad);
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{bad:?} must be rejected"
+            );
         }
     }
 }

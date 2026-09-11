@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::base::{finalize_stage, BaseSource, StagedBase};
+use crate::base::{finalize_stage, is_base_game_nfs, BaseSource, StagedBase};
 use crate::error::{Error, Result};
 use crate::package::extract::extract_title;
 use crate::package::ticket::decrypt_title_key;
@@ -140,11 +140,41 @@ impl BaseSource for NusBase {
             Ok(bytes)
         };
 
-        extract_title(&records, &title_key, &reader, build_dir, |name| {
-            name.starts_with("hif_") && name.ends_with(".nfs")
-        })?;
+        extract_title(&records, &title_key, &reader, build_dir, is_base_game_nfs)?;
 
         finalize_stage(build_dir)
+    }
+
+    fn materialize_original_nfs(
+        &mut self,
+        dest: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        log::info!(
+            "downloading the base's original game data from NUS to recover its apploader \
+             (this is the large content stage() normally skips)"
+        );
+        let tmd = self.client.tmd(self.title_id, self.version)?;
+        let records = parse_content_records(&tmd)
+            .map_err(|e| Error::UnsupportedDisc(format!("parsing NUS TMD: {e}")))?;
+        let title_key =
+            decrypt_title_key(&self.wiiu_common_key, self.title_id, &self.enc_title_key);
+
+        let reader = |id: u32| -> Result<Vec<u8>> {
+            log::info!("downloading content {id:08X} from NUS");
+            self.client.content(self.title_id, id)
+        };
+        // Keep only the NFS files and the key beside them; every other content is skipped and
+        // therefore never downloaded.
+        extract_title(&records, &title_key, &reader, dest, |name| {
+            !(is_base_game_nfs(name) || name == "htk.bin")
+        })?;
+
+        let content_dir = dest.join("content");
+        if content_dir.join("hif_000000.nfs").is_file() && dest.join("code/htk.bin").is_file() {
+            Ok(Some(content_dir))
+        } else {
+            Ok(None)
+        }
     }
 }
 

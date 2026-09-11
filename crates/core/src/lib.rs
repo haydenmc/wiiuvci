@@ -8,6 +8,7 @@
 //! common key, and the base title are all supplied by the user at runtime.
 
 pub(crate) mod aes_cbc;
+pub(crate) mod apploader;
 pub mod assets;
 pub mod base;
 pub(crate) mod consts;
