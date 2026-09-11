@@ -22,8 +22,7 @@
 //!       then the name table: NUL-terminated names in entry order.
 //! ```
 
-use byteorder::{BigEndian, WriteBytesExt};
-use std::io::Write;
+use byteorder::BigEndian;
 
 /// Offset factor used for file offsets within contents (matches retail titles).
 pub const OFFSET_FACTOR: u32 = 0x20;
@@ -104,18 +103,17 @@ impl Fst {
     pub fn serialize(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"FST\0");
-        out.write_u32::<BigEndian>(self.offset_factor).unwrap();
-        out.write_u32::<BigEndian>(self.contents.len() as u32)
-            .unwrap();
+        out.extend_from_slice(&self.offset_factor.to_be_bytes());
+        out.extend_from_slice(&(self.contents.len() as u32).to_be_bytes());
         // 0x0C..0x20 is zero in retail FSTs (the wiki's "0x0100" here does not match).
         out.extend_from_slice(&[0u8; 20]);
 
         for c in &self.contents {
-            out.write_u32::<BigEndian>(c.offset_sectors).unwrap();
-            out.write_u32::<BigEndian>(c.size_sectors).unwrap();
-            out.write_u64::<BigEndian>(c.owner_title_id).unwrap();
-            out.write_u32::<BigEndian>(c.group_id).unwrap();
-            out.write_u16::<BigEndian>(c.flags).unwrap();
+            out.extend_from_slice(&c.offset_sectors.to_be_bytes());
+            out.extend_from_slice(&c.size_sectors.to_be_bytes());
+            out.extend_from_slice(&c.owner_title_id.to_be_bytes());
+            out.extend_from_slice(&c.group_id.to_be_bytes());
+            out.extend_from_slice(&c.flags.to_be_bytes());
             out.extend_from_slice(&[0u8; 10]);
         }
 
@@ -140,17 +138,16 @@ impl Fst {
                     end_index,
                 } => (0x01u8, parent_index, end_index),
             };
-            out.write_u8(dir_bit | node.type_flags).unwrap();
-            out.write_u8((name_off >> 16) as u8).unwrap();
-            out.write_u16::<BigEndian>((name_off & 0xFFFF) as u16)
-                .unwrap();
-            out.write_u32::<BigEndian>(offset).unwrap();
-            out.write_u32::<BigEndian>(size).unwrap();
-            out.write_u16::<BigEndian>(node.flags).unwrap();
-            out.write_u16::<BigEndian>(node.cluster).unwrap();
+            out.push(dir_bit | node.type_flags);
+            out.push((name_off >> 16) as u8);
+            out.extend_from_slice(&((name_off & 0xFFFF) as u16).to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(&node.flags.to_be_bytes());
+            out.extend_from_slice(&node.cluster.to_be_bytes());
         }
 
-        out.write_all(&names).unwrap();
+        out.extend_from_slice(&names);
         out
     }
 
@@ -166,6 +163,13 @@ impl Fst {
             return None;
         }
         let offset_factor = BigEndian::read_u32(&data[4..8]);
+        // A zero offset_factor has no valid interpretation (every file offset would be
+        // `raw * 0 == 0`, silently collapsing every file onto its content's start) and would
+        // panic `serialize` on the reciprocal division — reject it here rather than producing
+        // an `Fst` that can't be round-tripped.
+        if offset_factor == 0 {
+            return None;
+        }
         let content_count = BigEndian::read_u32(&data[8..12]) as usize;
 
         // Bound the content table against `data`'s real length before trusting `content_count`
@@ -418,6 +422,18 @@ mod tests {
         out.extend_from_slice(&content_count.to_be_bytes());
         out.extend_from_slice(&[0u8; 20]);
         out
+    }
+
+    #[test]
+    fn parse_rejects_zero_offset_factor() {
+        // offset_factor = 0 has no valid interpretation (see the check in `parse`) and would
+        // panic `serialize`'s reciprocal division if it were let through.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"FST\0");
+        data.extend_from_slice(&0u32.to_be_bytes()); // offset_factor = 0
+        data.extend_from_slice(&0u32.to_be_bytes()); // content_count = 0
+        data.extend_from_slice(&[0u8; 20]);
+        assert!(Fst::parse(&data).is_none());
     }
 
     #[test]

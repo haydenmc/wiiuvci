@@ -7,6 +7,7 @@
 //!
 //! This module validates a supplied chain and passes it through unchanged.
 
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use crate::error::{Error, Result};
@@ -15,6 +16,16 @@ use crate::error::{Error, Result};
 pub const EXPECTED_CERT_LEN: usize = 0xA00; // 2560
 
 const ROOT_CA_ISSUER: &[u8] = b"Root-CA00000003";
+
+/// The WUP signature type used throughout the fakesigned package (TMD, ticket): RSA-2048
+/// SHA-256. Defined once here (rather than separately in `tmd.rs` and `ticket.rs`, which both
+/// used to hard-code the same `0x0001_0004` constant) since all three formats share Nintendo's
+/// one signature-type namespace.
+pub(crate) const SIG_TYPE_RSA2048_SHA256: u32 = 0x0001_0004;
+
+/// The range of signature types a retail certificate chain's first certificate may use. Also
+/// defined here, next to [`SIG_TYPE_RSA2048_SHA256`], since it's the same namespace.
+pub(crate) const SIG_TYPE_RANGE: RangeInclusive<u32> = 0x0001_0000..=0x0001_0005;
 
 /// A validated certificate chain, ready to write as `title.cert`.
 pub struct CertChain(pub Vec<u8>);
@@ -30,7 +41,7 @@ impl CertChain {
     /// Validate raw certificate-chain bytes.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         if bytes.len() != EXPECTED_CERT_LEN {
-            return Err(Error::UnsupportedDisc(format!(
+            return Err(Error::InvalidTitle(format!(
                 "certificate chain has unexpected size {} (expected {EXPECTED_CERT_LEN})",
                 bytes.len()
             )));
@@ -38,8 +49,8 @@ impl CertChain {
         // The first cert's signature type must be a known RSA type, and the chain must
         // contain the Root-CA00000003 issuer somewhere.
         let sig_type = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-        if !matches!(sig_type, 0x0001_0000..=0x0001_0005) {
-            return Err(Error::UnsupportedDisc(format!(
+        if !SIG_TYPE_RANGE.contains(&sig_type) {
+            return Err(Error::InvalidTitle(format!(
                 "certificate chain has unexpected signature type {sig_type:#x}"
             )));
         }
@@ -47,7 +58,7 @@ impl CertChain {
             .windows(ROOT_CA_ISSUER.len())
             .any(|w| w == ROOT_CA_ISSUER)
         {
-            return Err(Error::UnsupportedDisc(
+            return Err(Error::InvalidTitle(
                 "certificate chain does not contain the Root-CA00000003 issuer".into(),
             ));
         }

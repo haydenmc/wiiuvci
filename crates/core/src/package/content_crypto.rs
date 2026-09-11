@@ -245,7 +245,7 @@ pub fn decode_nonhashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>>
     let mut buf = cipher.to_vec();
     if !buf.is_empty() {
         cbc_decrypt(key, content_iv(index), &mut buf).map_err(|_| {
-            Error::UnsupportedDisc(format!(
+            Error::InvalidTitle(format!(
                 "non-hashed content ciphertext length {} is not a multiple of the AES block size (16)",
                 buf.len()
             ))
@@ -262,7 +262,7 @@ pub fn decode_nonhashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>>
 /// a truncated/corrupted HTTP download or user-supplied file.
 pub fn decode_hashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>> {
     if cipher.len() % HASH_BLOCK_TOTAL != 0 {
-        return Err(Error::UnsupportedDisc(format!(
+        return Err(Error::InvalidTitle(format!(
             "hashed content ciphertext length {} is not a multiple of the hashed block size (0x{HASH_BLOCK_TOTAL:x})",
             cipher.len()
         )));
@@ -273,14 +273,14 @@ pub fn decode_hashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>> {
         let block = &cipher[b * HASH_BLOCK_TOTAL..(b + 1) * HASH_BLOCK_TOTAL];
         let mut header = block[..HASH_HEADER].to_vec();
         cbc_decrypt(key, content_iv(index), &mut header).map_err(|_| {
-            Error::UnsupportedDisc(format!("decrypting hashed content block {b} header"))
+            Error::InvalidTitle(format!("decrypting hashed content block {b} header"))
         })?;
         header[1] ^= index as u8; // recover the real H0 section
         let mut data_iv = [0u8; 16];
         data_iv.copy_from_slice(&header[(b % 16) * HASH_LEN..(b % 16) * HASH_LEN + 16]);
         let mut data = block[HASH_HEADER..].to_vec();
         cbc_decrypt(key, data_iv, &mut data).map_err(|_| {
-            Error::UnsupportedDisc(format!("decrypting hashed content block {b} data"))
+            Error::InvalidTitle(format!("decrypting hashed content block {b} data"))
         })?;
         out.extend_from_slice(&data);
     }

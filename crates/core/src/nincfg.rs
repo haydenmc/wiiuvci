@@ -113,7 +113,8 @@ pub enum VideoMode {
     ForcePal60,
     /// Force MPAL.
     ForceMpal,
-    /// Force progressive (480p); combined with the region's mode.
+    /// Force progressive scan: NTSC 480p (`VID_FORCE | VID_NTSC | VID_PROG`), not the source
+    /// region's own mode.
     ForceProgressive,
     /// Disable Nintendont's video handling entirely.
     None,

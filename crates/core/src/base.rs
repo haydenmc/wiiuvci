@@ -13,8 +13,8 @@
 //!
 //! Both [`stage`](BaseSource::stage) the base's `code/`, `content/` (minus the base's own
 //! `hif_*.nfs`, which the injected game replaces) and `meta/` into a build directory, and
-//! return the 16-byte `htk.bin` NFS key. The `NusBase` (download-from-NUS) implementation is
-//! a planned future addition behind this same trait.
+//! return the 16-byte `htk.bin` NFS key. A third implementation, `NusBase` (download-from-NUS),
+//! lives in [`crate::nus`] behind this same trait.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -79,7 +79,7 @@ pub(crate) fn is_base_game_nfs(name: &str) -> bool {
 /// `base.join(rel)` would.
 pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     if rel.is_empty() {
-        return Err(Error::UnsupportedDisc(
+        return Err(Error::InvalidTitle(
             "refusing to join an empty path entry".into(),
         ));
     }
@@ -88,7 +88,7 @@ pub(crate) fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
         match component {
             std::path::Component::Normal(_) => {}
             _ => {
-                return Err(Error::UnsupportedDisc(format!(
+                return Err(Error::InvalidTitle(format!(
                     "refusing to join unsafe path entry {rel:?}"
                 )));
             }
@@ -130,11 +130,17 @@ pub(crate) fn finalize_stage(build_dir: &Path) -> Result<StagedBase> {
 // .wua (ZArchive) base
 // ---------------------------------------------------------------------------
 
+/// Base title subdirectories [`WuaBase::stage`] and [`DirBase::stage`] copy out; anything else
+/// under the title root (a `.wua` can carry other junk alongside the title) is left behind.
+const STAGE_SUBDIRS: [&str; 3] = ["code", "content", "meta"];
+
 /// A base title read from a Cemu `.wua` ZArchive.
 pub struct WuaBase {
     reader: ArchiveReader<fs::File>,
     /// Handle of the `<titleId>_v<version>` title root inside the archive.
     title_root: NodeHandle,
+    /// The archive path, kept only to annotate error messages.
+    path: PathBuf,
 }
 
 impl WuaBase {
@@ -143,35 +149,45 @@ impl WuaBase {
     /// If the archive holds multiple titles, the first one containing a `code/` directory is
     /// used.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let reader = ArchiveReader::open(path).map_err(|e| wua_err(path, e))?;
+        let path = path.as_ref().to_path_buf();
+        let reader =
+            ArchiveReader::open(&path).map_err(|e| wua_err(&path, "opening archive", e))?;
 
         let mut title_root = None;
         for entry in reader
             .directory_entries(ROOT_NODE)
-            .map_err(|e| wua_err(path, e))?
+            .map_err(|e| wua_err(&path, "reading root directory entries", e))?
         {
             if entry.kind == EntryKind::Directory {
-                // A title root has a `code/` child.
-                if let Ok(children) = reader.directory_entries(entry.handle) {
-                    if children
-                        .iter()
-                        .any(|c| c.name == b"code" && c.is_directory())
-                    {
-                        title_root = Some(entry.handle);
-                        break;
-                    }
+                // A title root has a `code/` child. A failure reading this candidate's children
+                // is a real archive problem, not evidence it isn't the title root — propagate
+                // it instead of silently treating it as "no code/ here, keep looking", which
+                // would otherwise surface as a misleading "no title found" for what's actually
+                // a corrupt archive.
+                let children = reader
+                    .directory_entries(entry.handle)
+                    .map_err(|e| wua_err(&path, "reading directory entries", e))?;
+                if children
+                    .iter()
+                    .any(|c| c.name == b"code" && c.is_directory())
+                {
+                    title_root = Some(entry.handle);
+                    break;
                 }
             }
         }
         let title_root = title_root.ok_or_else(|| {
-            Error::UnsupportedDisc(format!(
+            Error::InvalidTitle(format!(
                 "no Wii U title (a '<id>_v<n>/code/' tree) found in {}",
                 path.display()
             ))
         })?;
 
-        Ok(WuaBase { reader, title_root })
+        Ok(WuaBase {
+            reader,
+            title_root,
+            path,
+        })
     }
 
     fn copy_dir(&mut self, handle: NodeHandle, dest: &Path) -> Result<()> {
@@ -180,7 +196,7 @@ impl WuaBase {
         let entries: Vec<(String, EntryKind, NodeHandle)> = self
             .reader
             .directory_entries(handle)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .map_err(|e| wua_err(&self.path, "reading directory entries", e))?
             .into_iter()
             .map(|e| {
                 (
@@ -202,7 +218,7 @@ impl WuaBase {
                     let data = self
                         .reader
                         .read_file_to_end(h)
-                        .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+                        .map_err(|e| wua_err(&self.path, &format!("reading file {name:?}"), e))?;
                     fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
                 }
             }
@@ -217,7 +233,7 @@ impl WuaBase {
         Ok(self
             .reader
             .directory_entries(self.title_root)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .map_err(|e| wua_err(&self.path, "reading title root directory entries", e))?
             .into_iter()
             .find(|e| e.is_directory() && e.name == name.as_bytes())
             .map(|e| e.handle))
@@ -227,14 +243,16 @@ impl WuaBase {
 impl BaseSource for WuaBase {
     fn stage(&mut self, build_dir: &Path) -> Result<StagedBase> {
         let title_root = self.title_root;
-        // Copy code/, content/ (minus hif_*.nfs), meta/.
+        // Copy only code/, content/ (minus hif_*.nfs) and meta/ — not every directory under the
+        // title root, which may carry other files a `.wua` doesn't need staged.
         let subdirs: Vec<(String, NodeHandle)> = self
             .reader
             .directory_entries(title_root)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .map_err(|e| wua_err(&self.path, "reading title root directory entries", e))?
             .into_iter()
             .filter(|e| e.is_directory())
             .map(|e| (String::from_utf8_lossy(e.name).into_owned(), e.handle))
+            .filter(|(name, _)| STAGE_SUBDIRS.contains(&name.as_str()))
             .collect();
 
         for (name, handle) in subdirs {
@@ -250,7 +268,7 @@ impl BaseSource for WuaBase {
         let hifs: Vec<(String, NodeHandle)> = self
             .reader
             .directory_entries(content)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .map_err(|e| wua_err(&self.path, "reading content directory entries", e))?
             .into_iter()
             .filter(|e| {
                 e.kind == EntryKind::File && is_base_game_nfs(&String::from_utf8_lossy(e.name))
@@ -268,7 +286,7 @@ impl BaseSource for WuaBase {
             let data = self
                 .reader
                 .read_file_to_end(handle)
-                .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+                .map_err(|e| wua_err(&self.path, &format!("reading file {name:?}"), e))?;
             fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
         }
 
@@ -279,7 +297,7 @@ impl BaseSource for WuaBase {
         let Some(htk) = self
             .reader
             .directory_entries(code)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?
+            .map_err(|e| wua_err(&self.path, "reading code directory entries", e))?
             .into_iter()
             .find(|e| e.kind == EntryKind::File && e.name == b"htk.bin")
             .map(|e| e.handle)
@@ -291,7 +309,7 @@ impl BaseSource for WuaBase {
         let htk_bytes = self
             .reader
             .read_file_to_end(htk)
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+            .map_err(|e| wua_err(&self.path, "reading htk.bin", e))?;
         let htk_path = code_dir.join("htk.bin");
         fs::write(&htk_path, htk_bytes).map_err(|e| Error::io(&htk_path, e))?;
 
@@ -299,8 +317,12 @@ impl BaseSource for WuaBase {
     }
 }
 
-fn wua_err(path: &Path, e: zarust::Error) -> Error {
-    Error::Other(anyhow::anyhow!("reading {}: {}", path.display(), e))
+/// Wrap a `zarust` error with the archive path and the operation being performed, so a failure
+/// deep in a nested `copy_dir` call still names the `.wua` file it came from. Not
+/// [`Error::InvalidTitle`]: these are archive I/O failures (open, read), not judgments about
+/// the title's content being malformed.
+fn wua_err(path: &Path, op: &str, e: zarust::Error) -> Error {
+    Error::Other(anyhow::anyhow!("{op} on {}: {}", path.display(), e))
 }
 
 // ---------------------------------------------------------------------------
@@ -323,16 +345,18 @@ impl DirBase {
                 root: path.to_path_buf(),
             });
         }
-        // Look one level down for a title folder.
-        if let Ok(read) = fs::read_dir(path) {
-            for entry in read.flatten() {
-                let p = entry.path();
-                if p.is_dir() && p.join("code").is_dir() {
-                    return Ok(DirBase { root: p });
-                }
+        // Look one level down for a title folder. A real read failure here (permission denied,
+        // `path` not even a directory, ...) is propagated rather than swallowed into the same
+        // generic "no code/ directory found" the fallback below reports for an honestly-empty
+        // base — those are different problems and deserve different messages.
+        for entry in fs::read_dir(path).map_err(|e| Error::io(path, e))? {
+            let entry = entry.map_err(|e| Error::io(path, e))?;
+            let p = entry.path();
+            if p.is_dir() && p.join("code").is_dir() {
+                return Ok(DirBase { root: p });
             }
         }
-        Err(Error::UnsupportedDisc(format!(
+        Err(Error::InvalidTitle(format!(
             "no 'code/' directory found in base path {}",
             path.display()
         )))
@@ -341,7 +365,7 @@ impl DirBase {
 
 impl BaseSource for DirBase {
     fn stage(&mut self, build_dir: &Path) -> Result<StagedBase> {
-        for sub in ["code", "content", "meta"] {
+        for sub in STAGE_SUBDIRS {
             let src = self.root.join(sub);
             if src.is_dir() {
                 copy_tree(&src, &build_dir.join(sub))?;
@@ -391,7 +415,7 @@ pub fn open_base(path: impl AsRef<Path>) -> Result<Box<dyn BaseSource>> {
     {
         Ok(Box::new(WuaBase::open(path)?))
     } else {
-        Err(Error::UnsupportedDisc(format!(
+        Err(Error::InvalidTitle(format!(
             "base must be a directory or a .wua archive: {}",
             path.display()
         )))

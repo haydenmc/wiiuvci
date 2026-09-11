@@ -20,6 +20,9 @@
 use byteorder::{BigEndian, WriteBytesExt};
 use sha2::{Digest, Sha256};
 
+use super::cert::SIG_TYPE_RSA2048_SHA256;
+use crate::error::{Error, Result};
+
 /// A single content record for the TMD.
 #[derive(Clone, Debug)]
 pub struct ContentRecord {
@@ -35,8 +38,6 @@ pub struct ContentRecord {
     pub hash: [u8; 20],
 }
 
-/// Signature type used by fakesigned WUP titles: RSA-2048 SHA-256.
-const SIG_TYPE_RSA2048_SHA256: u32 = 0x0001_0004;
 const SIG_BLOCK: usize = 0x140;
 const HEADER_END: usize = 0x1DE;
 const INFO_TABLE_LEN: usize = 64 * 0x24;
@@ -104,13 +105,13 @@ pub fn build_tmd(title_id: u64, group_id: u16, contents: &[ContentRecord]) -> Ve
 }
 
 /// Parse the content records from a TMD's bytes.
-pub fn parse_content_records(tmd: &[u8]) -> Result<Vec<ContentRecord>, &'static str> {
+pub fn parse_content_records(tmd: &[u8]) -> Result<Vec<ContentRecord>> {
     if tmd.len() < RECORDS_OFF + 2 {
-        return Err("TMD too short");
+        return Err(Error::InvalidTitle("TMD too short".into()));
     }
     let count = u16::from_be_bytes([tmd[0x1DE], tmd[0x1DF]]) as usize;
     if tmd.len() < RECORDS_OFF + count * 0x30 {
-        return Err("TMD content records truncated");
+        return Err(Error::InvalidTitle("TMD content records truncated".into()));
     }
     let mut records = Vec::with_capacity(count);
     for i in 0..count {

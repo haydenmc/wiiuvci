@@ -1,6 +1,6 @@
 //! Patches a base Wii U `meta/meta.xml` template with per-game identifiers and names.
 
-use quick_xml::escape::escape;
+use quick_xml::escape::partial_escape;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
@@ -43,16 +43,14 @@ fn replacement_for(name: &str, opts: &MetaOptions) -> Option<String> {
         "drc_use" => Some(opts.drc_use.to_string()),
         "reserved_flag2" => Some(format!("{:08X}", opts.ids.reserved_flag2)),
         _ => {
-            for lang in LANGS {
-                if name == format!("longname_{lang}") {
-                    return Some(opts.long_name.to_string());
-                }
-                if name == format!("shortname_{lang}") {
-                    return Some(opts.short_name.to_string());
-                }
-                if name == format!("publisher_{lang}") {
-                    return Some(opts.publisher.to_string());
-                }
+            if let Some(suffix) = name.strip_prefix("longname_") {
+                return LANGS.contains(&suffix).then(|| opts.long_name.to_string());
+            }
+            if let Some(suffix) = name.strip_prefix("shortname_") {
+                return LANGS.contains(&suffix).then(|| opts.short_name.to_string());
+            }
+            if let Some(suffix) = name.strip_prefix("publisher_") {
+                return LANGS.contains(&suffix).then(|| opts.publisher.to_string());
             }
             None
         }
@@ -105,7 +103,11 @@ fn check_length(field: &str, start: &BytesStart, text: &str) -> Result<()> {
     };
     match read_attr(start, "type")?.as_deref() {
         Some("string") => {
-            let escaped_len = escape(text).len();
+            // Must measure the same escaping [`patch`] actually writes (`partial_escape`, which
+            // only touches `<`, `>`, `&`) — not quick-xml's full `escape()`, which also expands
+            // `'`/`"` to `&apos;`/`&quot;` in text content and would inflate the measured length
+            // past what ends up on disk, rejecting values that fit just fine.
+            let escaped_len = partial_escape(text).len();
             if escaped_len > limit {
                 return Err(Error::FormatLimit(format!(
                     "meta.xml field `{field}` value is {escaped_len} bytes (escaped), exceeding \
@@ -164,7 +166,9 @@ pub fn patch(base_meta_xml: &str, opts: &MetaOptions) -> Result<String> {
 
                     if !text.is_empty() {
                         writer
-                            .write_event(Event::Text(BytesText::new(&text)))
+                            .write_event(Event::Text(BytesText::from_escaped(partial_escape(
+                                &text,
+                            ))))
                             .map_err(xml_write_err)?;
                     }
                     writer.write_event(end_event).map_err(xml_write_err)?;
@@ -186,7 +190,9 @@ pub fn patch(base_meta_xml: &str, opts: &MetaOptions) -> Result<String> {
                             .map_err(xml_write_err)?;
                         if !text.is_empty() {
                             writer
-                                .write_event(Event::Text(BytesText::new(&text)))
+                                .write_event(Event::Text(BytesText::from_escaped(partial_escape(
+                                    &text,
+                                ))))
                                 .map_err(xml_write_err)?;
                         }
                         writer.write_event(Event::End(end)).map_err(xml_write_err)?;
@@ -427,6 +433,74 @@ mod tests {
         };
 
         let patched = patch(FIXTURE, &opts).expect("value at the exact limit must be accepted");
+        assert!(patched.contains(&format!(
+            "<longname_en type=\"string\" length=\"512\">{long_name}</longname_en>"
+        )));
+    }
+
+    /// `quick_xml::escape::escape` (the full XML escaper) turns `'` into `&apos;` and `"` into
+    /// `&quot;` in text content — which is legal XML but not what the reference injectors write,
+    /// and not necessary since neither character needs escaping outside an attribute value. A
+    /// title like GameTDB's "Link's Crossbow Training" must come out with a raw apostrophe.
+    #[test]
+    fn hermetic_apostrophe_round_trips_unescaped() {
+        let ids = fixture_ids();
+        let opts = MetaOptions {
+            ids: &ids,
+            long_name: "Link's Crossbow Training",
+            short_name: "",
+            publisher: "",
+            region: 2,
+            drc_use: 0,
+        };
+
+        let patched = patch(FIXTURE, &opts).expect("patch succeeds");
+        assert!(patched.contains("Link's Crossbow Training"));
+        assert!(
+            !patched.contains("&apos;"),
+            "apostrophe must not be escaped: {patched}"
+        );
+    }
+
+    /// `<`, `>` and `&` are still real XML metacharacters and must still be escaped — only the
+    /// switch away from full `escape()` must not stop escaping *these*.
+    #[test]
+    fn hermetic_xml_metacharacters_are_still_escaped() {
+        let ids = fixture_ids();
+        let opts = MetaOptions {
+            ids: &ids,
+            long_name: "Tom & Jerry <Test>",
+            short_name: "",
+            publisher: "",
+            region: 2,
+            drc_use: 0,
+        };
+
+        let patched = patch(FIXTURE, &opts).expect("patch succeeds");
+        assert!(patched.contains("Tom &amp; Jerry &lt;Test&gt;"));
+        assert!(!patched.contains("Tom & Jerry <Test>"));
+    }
+
+    /// Regression test for `check_length` measuring the wrong escaping: a value that is exactly
+    /// `length` bytes once written (an apostrophe left as one raw byte) must be accepted, even
+    /// though the old full-`escape()`-based measurement would have inflated it past the limit
+    /// (`&apos;` is 6 bytes) and wrongly rejected it.
+    #[test]
+    fn hermetic_apostrophe_value_at_exact_length_limit_passes() {
+        let ids = fixture_ids();
+        let long_name = format!("{}'", "A".repeat(511)); // exactly 512 bytes with partial_escape
+        assert_eq!(long_name.len(), 512);
+        let opts = MetaOptions {
+            ids: &ids,
+            long_name: &long_name,
+            short_name: "",
+            publisher: "",
+            region: 2,
+            drc_use: 0,
+        };
+
+        let patched = patch(FIXTURE, &opts)
+            .expect("a value that is exactly `length` bytes as written must be accepted");
         assert!(patched.contains(&format!(
             "<longname_en type=\"string\" length=\"512\">{long_name}</longname_en>"
         )));

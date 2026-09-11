@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::error::Result;
 
+use super::http_client;
 use super::images::BootTexture;
 
 const REPO_BASE: &str = "https://raw.githubusercontent.com/UWUVCI-PRIME/UWUVCI-IMAGES/master";
@@ -22,23 +23,19 @@ pub fn art_png_name(tex: BootTexture) -> Option<&'static str> {
 }
 
 /// Download `tex`'s PNG artwork for `game_id6` from the UWUVCI-IMAGES repository for
-/// `system` (e.g. `"wii"`). Returns `Ok(None)` if no repository art exists for this
-/// texture, on a 404, or on any network failure.
-pub fn download_texture(system: &str, game_id6: &str, tex: BootTexture) -> Result<Option<Vec<u8>>> {
-    let Some(png_name) = art_png_name(tex) else {
-        return Ok(None);
-    };
+/// `system` (e.g. `"wii"`). Returns `None` if no repository art exists for this texture, on a
+/// 404, or on any network failure — every failure is already `warn`ed here, so there is nothing
+/// left for a caller to do with an `Err`.
+pub fn download_texture_opt(system: &str, game_id6: &str, tex: BootTexture) -> Option<Vec<u8>> {
+    let png_name = art_png_name(tex)?;
 
     let url = format!("{REPO_BASE}/{system}/{game_id6}/{png_name}");
 
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-    {
+    let client = match http_client(FETCH_TIMEOUT) {
         Ok(c) => c,
         Err(e) => {
             log::warn!("failed to build HTTP client: {e}");
-            return Ok(None);
+            return None;
         }
     };
 
@@ -46,22 +43,30 @@ pub fn download_texture(system: &str, game_id6: &str, tex: BootTexture) -> Resul
         Ok(resp) => resp,
         Err(e) => {
             log::warn!("failed to reach UWUVCI-IMAGES at {url}: {e}");
-            return Ok(None);
+            return None;
         }
     };
 
     if !response.status().is_success() {
         log::warn!("no repository art at {url} (status {})", response.status());
-        return Ok(None);
+        return None;
     }
 
     match response.bytes() {
-        Ok(bytes) => Ok(Some(bytes.to_vec())),
+        Ok(bytes) => Some(bytes.to_vec()),
         Err(e) => {
             log::warn!("failed to read art response body from {url}: {e}");
-            Ok(None)
+            None
         }
     }
+}
+
+/// Thin `Result`-returning wrapper over [`download_texture_opt`], kept only for existing
+/// callers.
+// TODO(C1): pipeline switches to *_opt
+#[doc(hidden)]
+pub fn download_texture(system: &str, game_id6: &str, tex: BootTexture) -> Result<Option<Vec<u8>>> {
+    Ok(download_texture_opt(system, game_id6, tex))
 }
 
 #[cfg(test)]

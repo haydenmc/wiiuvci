@@ -17,6 +17,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::assets::http_client;
 use crate::base::{finalize_stage, is_base_game_nfs, BaseSource, StagedBase};
 use crate::error::{Error, Result};
 use crate::package::extract::extract_title;
@@ -25,6 +26,12 @@ use crate::package::tmd::parse_content_records;
 
 /// Default CCS CDN base URL (plain HTTP; content is already encrypted).
 pub const DEFAULT_NUS_URL: &str = "http://ccs.cdn.c.shop.nintendowifi.net/ccs/download";
+
+/// A content or TMD response bigger than this is refused before its body is read: no NUS content
+/// (even a base title's largest `.app`) legitimately approaches this size, so a `Content-Length`
+/// past it means either a misbehaving server/mirror or a mistaken URL — better to fail fast on
+/// the header than stream gigabytes into memory first.
+const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// A minimal NUS/CCS content client.
 pub struct NusClient {
@@ -45,12 +52,7 @@ impl NusClient {
         // [`NusClient::get`] — the body is streamed through `Read`, where reqwest applies
         // `timeout` *per read* (a stall timeout) rather than as a whole-request deadline, so a
         // slow-but-progressing download is never cut off while a dead connection still fails.
-        let http = reqwest::blocking::Client::builder()
-            .user_agent("wiivci")
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(|e| Error::Other(anyhow::anyhow!("building HTTP client: {e}")))?;
+        let http = http_client(Duration::from_secs(120))?;
         Ok(NusClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http,
@@ -69,6 +71,14 @@ impl NusClient {
                 "GET {url}: HTTP {}",
                 resp.status()
             )));
+        }
+        if let Some(len) = resp.content_length() {
+            if len > MAX_RESPONSE_BYTES {
+                return Err(Error::Other(anyhow::anyhow!(
+                    "GET {url}: Content-Length {len} exceeds the {MAX_RESPONSE_BYTES}-byte sanity \
+                     limit; refusing to download it"
+                )));
+            }
         }
         // Stream the body via `Read` rather than `Response::bytes()`: `bytes()` runs the whole
         // body download under the client's single `timeout`, so any content that takes longer
@@ -133,8 +143,7 @@ impl BaseSource for NusBase {
     fn stage(&mut self, build_dir: &Path) -> Result<StagedBase> {
         log::info!("downloading base TMD for {:016x} from NUS", self.title_id);
         let tmd = self.client.tmd(self.title_id, self.version)?;
-        let records = parse_content_records(&tmd)
-            .map_err(|e| Error::UnsupportedDisc(format!("parsing NUS TMD: {e}")))?;
+        let records = parse_content_records(&tmd)?;
 
         let title_key =
             decrypt_title_key(&self.wiiu_common_key, self.title_id, &self.enc_title_key);
@@ -166,8 +175,7 @@ impl BaseSource for NusBase {
              (this is the large content stage() normally skips)"
         );
         let tmd = self.client.tmd(self.title_id, self.version)?;
-        let records = parse_content_records(&tmd)
-            .map_err(|e| Error::UnsupportedDisc(format!("parsing NUS TMD: {e}")))?;
+        let records = parse_content_records(&tmd)?;
         let title_key =
             decrypt_title_key(&self.wiiu_common_key, self.title_id, &self.enc_title_key);
 

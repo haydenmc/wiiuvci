@@ -46,7 +46,7 @@ fn decode_content(rec: &ContentRecord, title_key: &[u8; 16], cipher: &[u8]) -> R
         (data, hash)
     };
     if actual_hash != rec.hash {
-        return Err(Error::UnsupportedDisc(format!(
+        return Err(Error::InvalidTitle(format!(
             "content {:08x} (index {}) failed TMD hash verification — corrupted or tampered download",
             rec.id, rec.index
         )));
@@ -98,11 +98,11 @@ pub fn extract_title(
     // Content index 0 is the FST.
     let fst_rec = by_index
         .get(&0)
-        .ok_or_else(|| Error::UnsupportedDisc("title has no FST content".into()))?;
+        .ok_or_else(|| Error::InvalidTitle("title has no FST content".into()))?;
     let fst_cipher = reader.read(fst_rec.id)?;
     let fst_data = decode_content(fst_rec, title_key, &fst_cipher)?;
     let fst = Fst::parse(&fst_data)
-        .ok_or_else(|| Error::UnsupportedDisc("could not parse title FST".into()))?;
+        .ok_or_else(|| Error::InvalidTitle("could not parse title FST".into()))?;
 
     let paths = node_paths(&fst);
     let mut decoded_cache: HashMap<u16, Vec<u8>> = HashMap::new();
@@ -121,10 +121,7 @@ pub fn extract_title(
                     continue;
                 }
                 let rec = by_index.get(&node.cluster).ok_or_else(|| {
-                    Error::UnsupportedDisc(format!(
-                        "FST references missing content {}",
-                        node.cluster
-                    ))
+                    Error::InvalidTitle(format!("FST references missing content {}", node.cluster))
                 })?;
                 let data = match decoded_cache.get(&node.cluster) {
                     Some(d) => d,
@@ -136,7 +133,7 @@ pub fn extract_title(
                 };
                 let (start, end) = (offset as usize, (offset + size) as usize);
                 if end > data.len() {
-                    return Err(Error::UnsupportedDisc(format!(
+                    return Err(Error::InvalidTitle(format!(
                         "file {rel} extends past its content ({end} > {})",
                         data.len()
                     )));

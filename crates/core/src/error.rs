@@ -25,6 +25,12 @@ pub enum Error {
     #[error("unsupported or invalid source disc: {0}")]
     UnsupportedDisc(String),
 
+    /// A WUP/base title's own content was malformed or failed validation — as opposed to
+    /// [`Error::UnsupportedDisc`], which is about the *source* disc being injected. Covers a
+    /// bad FST, TMD, certificate chain, ticket, encrypted content, or base staging layout.
+    #[error("invalid title content: {0}")]
+    InvalidTitle(String),
+
     /// A limit imposed by an on-disk format was exceeded.
     #[error("format limit exceeded: {0}")]
     FormatLimit(String),
