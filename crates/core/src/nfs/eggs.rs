@@ -21,6 +21,8 @@
 //! `num_lba_ranges` and is lenient about the fill, so a `0x00`-padded header still round-trips —
 //! it just won't boot on hardware. This bit us: installs fine, hangs on launch.)
 
+use std::io::Write;
+
 use byteorder::{BigEndian, WriteBytesExt};
 
 use crate::error::{Error, Result};
@@ -97,8 +99,6 @@ impl EggsHeader {
         buf
     }
 }
-
-use std::io::Write;
 
 #[cfg(test)]
 mod tests {

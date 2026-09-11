@@ -14,7 +14,7 @@ pub mod tmd;
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use cert::CertChain;
@@ -168,13 +168,105 @@ fn is_known_output_name(name: &str) -> bool {
     stem.len() == 8 && stem.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Suffix of an output still being written. See [`StagedOutputs`].
+const PART_SUFFIX: &str = ".part";
+
+/// Returns `true` if `name` is a file a build of this crate may have left in `out_dir`: a final
+/// output ([`is_known_output_name`]) or the `<name>.part` temporary of one.
+///
+/// A `.part` file only survives a process that died mid-build (a kill, a power cut) — [`Drop`]
+/// removes them otherwise — so the next build must be free to sweep them away, exactly like a
+/// stale final output.
+fn is_sweepable_output_name(name: &str) -> bool {
+    is_known_output_name(name)
+        || name
+            .strip_suffix(PART_SUFFIX)
+            .is_some_and(is_known_output_name)
+}
+
+/// Outputs written as `<name>.part` and renamed into place by [`StagedOutputs::commit`]; if the
+/// value is dropped uncommitted, every `.part` is removed.
+///
+/// Without this, a build that fails partway (disc full, a staged file vanishing, a kill) leaves
+/// `out_dir` holding some of the `.app`s plus — worse — a `title.tmd` that looks complete. WUP
+/// installers copy whatever they find next to the TMD, so a partial package is an *installable*
+/// broken title rather than an obvious failure. Staging makes the final names appear only once
+/// every byte is on disk.
+///
+/// The `.part` files are siblings in `out_dir`, so they are on the same filesystem as their
+/// destinations and [`fs::rename`] is a metadata operation — no second pass over a multi-GB
+/// `.app`. No `fsync`: this guards against a failed *build*, not against a power-cut filesystem.
+struct StagedOutputs<'a> {
+    out_dir: &'a Path,
+    /// `(part path, final path)` in registration order — also the order `commit` renames in.
+    pending: Vec<(PathBuf, PathBuf)>,
+    committed: bool,
+}
+
+impl<'a> StagedOutputs<'a> {
+    fn new(out_dir: &'a Path) -> Self {
+        StagedOutputs {
+            out_dir,
+            pending: Vec::new(),
+            committed: false,
+        }
+    }
+
+    /// Register `final_name` as an output of this build and return the `.part` path to write it to.
+    fn stage(&mut self, final_name: &str) -> PathBuf {
+        let part = self.out_dir.join(format!("{final_name}{PART_SUFFIX}"));
+        let final_path = self.out_dir.join(final_name);
+        self.pending.push((part.clone(), final_path));
+        part
+    }
+
+    /// Rename every staged output into its final name, in registration order.
+    ///
+    /// On Windows `rename` fails if the destination exists, but [`clean_stale_outputs`] ran at the
+    /// start of the build and removed every known final name, so the destinations are free.
+    ///
+    /// A rename that fails mid-way leaves a genuinely partial package behind, which is the state
+    /// this type exists to avoid — so the already-renamed finals are removed again (best effort,
+    /// alongside the remaining `.part`s) before the error propagates.
+    fn commit(mut self) -> Result<()> {
+        for (i, (part, final_path)) in self.pending.iter().enumerate() {
+            if let Err(e) = fs::rename(part, final_path) {
+                for (_, done) in &self.pending[..i] {
+                    let _ = fs::remove_file(done);
+                }
+                for (remaining, _) in &self.pending[i..] {
+                    let _ = fs::remove_file(remaining);
+                }
+                // Cleanup is done; stop `Drop` from repeating it.
+                self.committed = true;
+                return Err(Error::io(part, e));
+            }
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedOutputs<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // Failing to clean up is not worth masking the error that caused the failure.
+        for (part, _) in &self.pending {
+            let _ = fs::remove_file(part);
+        }
+    }
+}
+
 /// Remove pre-existing WUP output files from `out_dir` before a build writes new ones.
 ///
 /// A rebuild that produces fewer contents than a previous run into the same `out_dir` would
 /// otherwise leave orphan `NNNNNNNN.app`/`.h3` files behind; WUP installers copy everything they
 /// find, so a stale orphan would get installed alongside the new title. Only files matching the
-/// known output patterns are removed (see [`is_known_output_name`]); nothing else in `out_dir`
-/// (other files, subdirectories) is touched.
+/// known output patterns are removed (see [`is_sweepable_output_name`], which also covers `.part`
+/// leftovers from a build that was killed); nothing else in `out_dir` (other files,
+/// subdirectories) is touched.
 fn clean_stale_outputs(out_dir: &Path) -> Result<()> {
     let entries = match fs::read_dir(out_dir) {
         Ok(entries) => entries,
@@ -194,7 +286,7 @@ fn clean_stale_outputs(out_dir: &Path) -> Result<()> {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if is_known_output_name(name) {
+        if is_sweepable_output_name(name) {
             fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
         }
     }
@@ -202,6 +294,10 @@ fn clean_stale_outputs(out_dir: &Path) -> Result<()> {
 }
 
 /// Build a complete installable WUP package from a staged build directory into `out_dir`.
+///
+/// Every output is written to a `<name>.part` sibling and renamed into place only once the whole
+/// package is on disk (see [`StagedOutputs`]), so a failure never leaves an installable-looking
+/// partial package behind.
 pub fn build_package(
     build_dir: &Path,
     out_dir: &Path,
@@ -211,11 +307,12 @@ pub fn build_package(
     clean_stale_outputs(out_dir)?;
     let plan = content::plan(build_dir, params.title_id)?;
 
+    let mut staged = StagedOutputs::new(out_dir);
     let mut records = Vec::with_capacity(plan.contents.len());
     let mut total_content_bytes = 0u64;
 
     for c in &plan.contents {
-        let app_path = out_dir.join(format!("{:08x}.app", c.index));
+        let app_path = staged.stage(&format!("{:08x}.app", c.index));
         let (size, tmd_hash) = if c.content_type == content::TYPE_HASHED {
             // Large game contents: stream the plaintext straight to the encrypted .app one hash
             // group at a time, so we never buffer the whole content in memory.
@@ -225,7 +322,7 @@ pub fn build_package(
             let summary = encode_hashed_to_writer(&params.title_key, c.index, reader, &mut writer)
                 .map_err(|e| Error::io(&app_path, e))?;
             writer.flush().map_err(|e| Error::io(&app_path, e))?;
-            let h3_path = out_dir.join(format!("{:08x}.h3", c.index));
+            let h3_path = staged.stage(&format!("{:08x}.h3", c.index));
             fs::write(&h3_path, &summary.h3).map_err(|e| Error::io(&h3_path, e))?;
             (summary.size, summary.tmd_hash)
         } else {
@@ -246,19 +343,24 @@ pub fn build_package(
         });
     }
 
-    // TMD, ticket, cert.
-    let tmd_bytes = tmd::build_tmd(params.title_id, params.group_id, &records);
-    fs::write(out_dir.join("title.tmd"), &tmd_bytes)
-        .map_err(|e| Error::io(out_dir.join("title.tmd"), e))?;
+    // Cert, ticket, TMD — registered (and so renamed into place) in that order, leaving the TMD
+    // last: it is the file installers key on to decide a package is there at all.
+    let cert_path = staged.stage("title.cert");
+    fs::write(&cert_path, params.cert.as_bytes()).map_err(|e| Error::io(&cert_path, e))?;
 
     let enc_title_key =
         ticket::encrypt_title_key(&params.wiiu_common_key, params.title_id, &params.title_key);
     let tik_bytes = ticket::build_ticket(params.title_id, &enc_title_key);
-    fs::write(out_dir.join("title.tik"), &tik_bytes)
-        .map_err(|e| Error::io(out_dir.join("title.tik"), e))?;
+    let tik_path = staged.stage("title.tik");
+    fs::write(&tik_path, &tik_bytes).map_err(|e| Error::io(&tik_path, e))?;
 
-    fs::write(out_dir.join("title.cert"), params.cert.as_bytes())
-        .map_err(|e| Error::io(out_dir.join("title.cert"), e))?;
+    let tmd_bytes = tmd::build_tmd(params.title_id, params.group_id, &records);
+    let tmd_path = staged.stage("title.tmd");
+    fs::write(&tmd_path, &tmd_bytes).map_err(|e| Error::io(&tmd_path, e))?;
+
+    // Every byte is on disk (the hashed-content writer was flushed and dropped inside its block
+    // above); publish the whole package under its final names.
+    staged.commit()?;
 
     Ok(PackageStats {
         content_count: plan.contents.len(),
@@ -269,6 +371,7 @@ pub fn build_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cert::EXPECTED_CERT_LEN;
     use content::{PlacedFile, PlannedContent, TYPE_HASHED};
 
     /// The streaming reader must reproduce `assemble_content`'s buffer byte-for-byte, including the
@@ -391,6 +494,18 @@ mod tests {
         assert!(!is_known_output_name("deadbeefg.app")); // 9 chars
         assert!(!is_known_output_name("nothex01.app")); // non-hex chars
         assert!(!is_known_output_name("content"));
+
+        // `.part` temporaries are sweepable but are not themselves final outputs.
+        for name in ["0000000f.app.part", "0000000f.h3.part", "title.tmd.part"] {
+            assert!(!is_known_output_name(name), "{name}");
+            assert!(is_sweepable_output_name(name), "{name}");
+        }
+        for name in ["readme.txt.part", "deadbeef.app.bak.part", ".part"] {
+            assert!(!is_sweepable_output_name(name), "{name}");
+        }
+        // Every final output is sweepable too.
+        assert!(is_sweepable_output_name("title.tmd"));
+        assert!(is_sweepable_output_name("0000000f.app"));
     }
 
     /// `clean_stale_outputs` must remove only files matching the known output patterns, leaving
@@ -400,8 +515,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
 
-        let known = ["0000000f.app", "0000000f.h3", "title.tmd"];
-        let decoys = ["readme.txt", "deadbeef.app.bak"];
+        // Including `.part` leftovers from a build that was killed before it could clean up.
+        let known = [
+            "0000000f.app",
+            "0000000f.h3",
+            "title.tmd",
+            "00000010.app.part",
+            "title.tik.part",
+        ];
+        let decoys = ["readme.txt", "deadbeef.app.bak", "readme.txt.part"];
         for name in known.iter().chain(decoys.iter()) {
             fs::write(p.join(name), b"stale").unwrap();
         }
@@ -428,5 +550,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist-yet");
         clean_stale_outputs(&missing).unwrap();
+    }
+
+    /// Stage the smallest tree `content::plan` accepts: one non-hashed content per `code/` file,
+    /// a hashed `meta.xml` content, and one hashed game content holding the NFS.
+    fn stage_minimal_build(build_dir: &Path) {
+        for (rel, body) in [
+            ("code/app.xml", &b"<app/>"[..]),
+            ("code/cos.xml", &b"<cos/>"[..]),
+            ("meta/meta.xml", &b"<menu/>"[..]),
+            ("content/hif_000000.nfs", &b"EGGS"[..]),
+        ] {
+            let path = build_dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    fn test_params(cert: &CertChain) -> PackageParams<'_> {
+        PackageParams {
+            title_id: 0x0005_0002_1010_1000,
+            group_id: 0x0000,
+            wiiu_common_key: [0x11; 16],
+            title_key: [0x22; 16],
+            cert,
+        }
+    }
+
+    /// A build that runs to completion must leave only final names — no `.part` sibling may
+    /// survive `commit`, or the next `clean_stale_outputs` would be doing real work every time and
+    /// the package directory would ship junk.
+    #[test]
+    fn successful_build_leaves_only_final_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let build_dir = dir.path().join("build");
+        let out_dir = dir.path().join("out");
+        stage_minimal_build(&build_dir);
+
+        let cert = CertChain(vec![0u8; EXPECTED_CERT_LEN]);
+        let stats = build_package(&build_dir, &out_dir, &test_params(&cert)).unwrap();
+        assert!(stats.content_count >= 4);
+
+        let mut names: Vec<String> = fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(!names.is_empty());
+        for name in &names {
+            assert!(
+                is_known_output_name(name),
+                "unexpected leftover in the package dir: {name}"
+            );
+            assert!(!name.ends_with(PART_SUFFIX), "leftover temporary: {name}");
+        }
+        for required in ["title.tmd", "title.tik", "title.cert"] {
+            assert!(names.iter().any(|n| n == required), "missing {required}");
+        }
+    }
+
+    /// The point of staging: a build that fails partway must leave **nothing** installable behind.
+    /// Without it, the small contents (and on some paths the TMD) would already sit in `out_dir`
+    /// under their final names, and a WUP installer would happily copy that torso.
+    ///
+    /// The failure is injected with a dangling symlink in `content/`: `content::plan` accepts it
+    /// (`DirEntry::metadata` reports the link itself, not its missing target), and the streaming
+    /// [`ContentPlaintextReader`] then fails on `File::open` — after the code/meta contents have
+    /// been written.
+    #[test]
+    #[cfg(unix)]
+    fn failed_build_leaves_no_package_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let build_dir = dir.path().join("build");
+        let out_dir = dir.path().join("out");
+        stage_minimal_build(&build_dir);
+        std::os::unix::fs::symlink("/nonexistent", build_dir.join("content/zz.bin")).unwrap();
+
+        let cert = CertChain(vec![0u8; EXPECTED_CERT_LEN]);
+        let err = build_package(&build_dir, &out_dir, &test_params(&cert)).unwrap_err();
+        eprintln!("expected failure: {err}");
+
+        for entry in fs::read_dir(&out_dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !is_sweepable_output_name(&name),
+                "a failed build left {name} behind"
+            );
+        }
     }
 }

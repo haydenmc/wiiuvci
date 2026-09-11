@@ -38,7 +38,8 @@ use sha1::{Digest, Sha1};
 
 use crate::consts::{CLUSTER_DATA, HASH_BLOCK, SECTORS_PER_GROUP, TMD_CONTENT0_HASH};
 use crate::disc_patch::{
-    h3_entry_mut, recompute_group, DiscPlan, PartitionPlan, H3_TABLE_SIZE, MAX_H3_GROUPS,
+    h3_entry_mut, recompute_group, DiscPlan, PartitionPlan, StoredGroups, H3_TABLE_SIZE,
+    MAX_H3_GROUPS,
 };
 use crate::error::{Error, Result};
 use crate::input::{DecryptedDisc, PartitionSpan, ReadSeek, DISC_SECTOR_SIZE};
@@ -515,6 +516,8 @@ pub fn author_gc_disc(
     // it keeps the invariant `crate::nfs` relies on in one place (and catches a future layout
     // edit that reorders these constants).
     span.validate()?;
+    // `h3_table` is last borrowed by `build_partition_header` above, so it can move into the plan
+    // here; `build_nfs` compares the H3 it recomputes per group against this copy.
     let plan = DiscPlan {
         partitions: vec![PartitionPlan {
             start_sector: span.start_sector,
@@ -522,13 +525,13 @@ pub fn author_gc_disc(
             data_end_sector: span.data_end_sector,
             header_patches: Vec::new(),
             edits: Vec::new(),
+            h3_table,
             // The synthetic GC disc is compact (Nintendont + game.iso, no gaps); store all groups.
-            stored_data_groups: Vec::new(),
+            stored_data_groups: StoredGroups::All,
         }],
         // The authored disc already has a single DATA partition and a matching table.
         disc_patches: Vec::new(),
-        rvlt_content_hash: Some(content_hash),
-        applied: Vec::new(),
+        rvlt_content_hash: content_hash,
     };
 
     Ok(AuthoredDisc {
@@ -815,7 +818,7 @@ mod tests {
         .unwrap();
 
         // The disc's TMD content hash must equal SHA1(H3 table) — the invariant a Wii VC checks.
-        let content_hash = authored.plan.rvlt_content_hash.unwrap();
+        let content_hash = authored.plan.rvlt_content_hash;
         assert_eq!(
             &authored.rvlt_tmd[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20],
             content_hash.as_slice()
@@ -826,7 +829,11 @@ mod tests {
         let nfs_dir = out.path().join("content");
         std::fs::create_dir_all(&nfs_dir).unwrap();
         let plan = authored.plan.clone();
-        build_nfs(&mut authored, &htk, &nfs_dir, &plan).unwrap();
+        let stats = build_nfs(&mut authored, &htk, &nfs_dir, &plan).unwrap();
+        assert_eq!(
+            stats.h3_mismatches, 0,
+            "every authored group's H3 must match the table written into the partition header"
+        );
         std::fs::write(nfs_dir.join("htk.bin"), htk).unwrap();
 
         // Reopen with hash validation on.

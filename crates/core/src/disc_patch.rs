@@ -57,6 +57,21 @@ fn sha1(buf: &[u8]) -> [u8; 20] {
     Sha1::digest(buf).into()
 }
 
+/// Which 64-cluster hash groups of a partition's data region the NFS stores.
+///
+/// Spelled out as an enum rather than "an empty run list means everything": the two cases are
+/// genuinely different intentions (the synthetic GC disc is compact and stores all of it; a real
+/// disc's runs come from FST coverage), and the sentinel turned a planner that produced *no* runs
+/// — which would mean a broken plan — into a silent request to store the whole multi-GB partition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredGroups {
+    /// Store every hash group of the data region (used by the synthetic GC disc, which has no gaps).
+    All,
+    /// Store only these `(first_group, num_groups)` runs; the rest are inter-file gaps skipped in
+    /// the NFS (sparse storage, no compaction).
+    Runs(Vec<(u32, u32)>),
+}
+
 /// Per-partition plan consumed by [`crate::nfs::build_nfs`]: which sectors the partition spans,
 /// which header bytes to overlay, which `main.dol` edits to apply, and which hash groups to store.
 #[derive(Clone)]
@@ -74,10 +89,13 @@ pub struct PartitionPlan {
     /// `main.dol` edits, as (logical partition-data offset, replacement bytes). Data partition
     /// only; empty otherwise.
     pub edits: Vec<(u64, Vec<u8>)>,
-    /// Runs of 64-cluster hash groups (0-based within the data region) that hold real data and
-    /// must be stored; the rest are inter-file gaps skipped in the NFS (sparse storage, no
-    /// compaction). Empty means "store every group" (used by the synthetic GC disc).
-    pub stored_data_groups: Vec<(u32, u32)>,
+    /// The partition's H3 table as the NFS will contain it — the same bytes `header_patches`
+    /// writes over the on-disc table. Exposed so [`crate::nfs::build_nfs`] can compare the H3 it
+    /// recomputes for each stored group against what the table claims, catching a plan whose
+    /// table and data have drifted apart (the console does not verify this, so nothing else would).
+    pub h3_table: Vec<u8>,
+    /// Which hash groups of the data region the NFS stores.
+    pub stored_data_groups: StoredGroups,
 }
 
 /// A whole-disc rebuild plan: how to rebuild each partition's Wii hash tree (and apply any
@@ -91,12 +109,10 @@ pub struct DiscPlan {
     /// Byte-range overlays applied to the disc-level (non-partition) sectors — used to rewrite the
     /// partition table so it lists only the data partition. Keyed by absolute disc byte offset.
     pub disc_patches: Vec<(u64, Vec<u8>)>,
-    /// Content hash for the emitted `rvlt.tmd`: SHA-1 of the data partition's H3 table. Always
-    /// set by [`plan_disc`] and [`crate::wii_author::author_gc_disc`]; when no `main.dol` edit was
-    /// applied it simply equals the hash of the source disc's own H3 table.
-    pub rvlt_content_hash: Option<[u8; 20]>,
-    /// Names of the video patches that matched and were applied.
-    pub applied: Vec<&'static str>,
+    /// Content hash for the emitted `rvlt.tmd`: SHA-1 of the data partition's H3 table. Both
+    /// producers ([`plan_disc`] and [`crate::wii_author::author_gc_disc`]) always compute it; when
+    /// no `main.dol` edit was applied it simply equals the hash of the source disc's own H3 table.
+    pub rvlt_content_hash: [u8; 20],
 }
 
 /// Recompute the H0/H1/H2 hash blocks of a full 64-cluster group in place and return its H3.
@@ -287,7 +303,6 @@ pub fn plan_disc(
     // The partition's content hash is SHA1 of the (possibly rebuilt) H3 table. This is unchanged
     // from the source when there were no edits.
     let content_hash = sha1(&h3_table);
-    let rvlt_content_hash = Some(content_hash);
 
     // Fakesign the partition's OWN in-disc ticket and TMD (zero the RSA signatures) and set the
     // TMD's content hash. The Wii U's patched fw.img accepts a zeroed signature and *rejects* a
@@ -304,13 +319,15 @@ pub fn plan_disc(
     header_patches.push((tmd_base + TMD_SIG.start as u64, vec![0u8; TMD_SIG.len()]));
     header_patches.push((tmd_base + TMD_CONTENT0_HASH as u64, content_hash.to_vec()));
 
-    // Always (re)write the valid H3 table so we don't depend on the stream's copy.
-    header_patches.push((h3_base, h3_table));
+    // Always (re)write the valid H3 table so we don't depend on the stream's copy. The plan keeps
+    // its own copy of the same bytes for `build_nfs`'s H3 cross-check.
+    header_patches.push((h3_base, h3_table.clone()));
 
     // Sparse storage: only the hash groups the FST (and boot structures) actually use are written
     // to the NFS; the multi-GB inter-file gaps are skipped without relocating any file. `skip_gaps`
     // / `trim_zeros` control gap-skipping and wholly-zero-file trimming (see `used_data_group_runs`).
-    let stored_data_groups = source.used_data_group_runs(skip_gaps, trim_zeros)?;
+    let stored_data_groups =
+        StoredGroups::Runs(source.used_data_group_runs(skip_gaps, trim_zeros)?);
 
     let partitions = vec![PartitionPlan {
         start_sector: span.start_sector,
@@ -318,6 +335,7 @@ pub fn plan_disc(
         data_end_sector: span.data_end_sector,
         header_patches,
         edits,
+        h3_table,
         stored_data_groups,
     }];
     let disc_patches = partition_table_patches(part_base);
@@ -328,8 +346,7 @@ pub fn plan_disc(
     Ok(DiscPlan {
         partitions,
         disc_patches,
-        rvlt_content_hash,
-        applied,
+        rvlt_content_hash: content_hash,
     })
 }
 
@@ -488,13 +505,15 @@ mod tests {
 
         let mut source = SourceDisc::open(&title).unwrap();
         let plan = plan_disc(&mut source, &patches, true, false).unwrap();
-        let content_hash = plan
-            .rvlt_content_hash
-            .expect("data partition should be patched");
+        let content_hash = plan.rvlt_content_hash;
 
         let htk = [0x5Au8; 16];
         let out = tempfile::tempdir().unwrap();
-        build_nfs(&mut source, &htk, out.path(), &plan).unwrap();
+        let stats = build_nfs(&mut source, &htk, out.path(), &plan).unwrap();
+        assert_eq!(
+            stats.h3_mismatches, 0,
+            "the patched groups' rebuilt H3 must match the rebuilt H3 table"
+        );
         std::fs::write(out.path().join("htk.bin"), htk).unwrap();
 
         let nfs = nod::Disc::new_with_options(

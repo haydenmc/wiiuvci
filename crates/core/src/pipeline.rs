@@ -187,12 +187,8 @@ pub fn run(mut config: Config, work_dir: &Path) -> Result<Summary> {
     std::fs::write(staged.code_dir.join("rvlt.tik"), &rvlt_tik)
         .map_err(|e| Error::io(staged.code_dir.join("rvlt.tik"), e))?;
     let mut rvlt_tmd = source.raw_tmd().to_vec();
-    if let Some(content_hash) = plan.rvlt_content_hash {
-        // Also updates the content hash to the rebuilt H3 table, and zeroes the signature.
-        update_rvlt_tmd(&mut rvlt_tmd, &content_hash)?;
-    } else {
-        fakesign(&mut rvlt_tmd)?;
-    }
+    // Also updates the content hash to the rebuilt H3 table, and zeroes the signature.
+    update_rvlt_tmd(&mut rvlt_tmd, &plan.rvlt_content_hash)?;
     std::fs::write(staged.code_dir.join("rvlt.tmd"), &rvlt_tmd)
         .map_err(|e| Error::io(staged.code_dir.join("rvlt.tmd"), e))?;
 
