@@ -120,6 +120,13 @@ pub struct GameCubeOptions {
     pub wiiu_gamepad_slot: u32,
     /// Optional Gecko cheat file path (on SD) recorded in `nincfg.bin`.
     pub cheat_path: Option<String>,
+    /// Override the synthetic carrier disc's 6-character disc id (and the Wii disc title id
+    /// derived from its first four characters). Defaults to the GameCube game's own id. The
+    /// reference TeconMoon carrier disc is `CEMU69`.
+    pub disc_id: Option<[u8; 6]>,
+    /// Override the carrier disc's header title string. Defaults to `--title` / the game id. The
+    /// reference carrier disc is `PunEmu 1.1`.
+    pub disc_title: Option<String>,
 }
 
 /// Result of an injection.
@@ -278,14 +285,19 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
         // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
         let _ = std::fs::remove_dir_all(&nfs_scratch);
     }
-    let disc_title = config.title.clone().unwrap_or_else(|| game_id.clone());
+    let disc_title = gc_opts
+        .disc_title
+        .clone()
+        .or_else(|| config.title.clone())
+        .unwrap_or_else(|| game_id.clone());
+    let disc_id = gc_opts.disc_id.unwrap_or_else(|| gc.game_id());
     let disc_path = work_dir.join("gc_disc.img");
     log::info!(
         "authoring synthetic Wii disc (embedding {} MiB game.iso)…",
         iso_size / (1024 * 1024)
     );
     let inputs = GcDiscInputs {
-        game_id: gc.game_id(),
+        game_id: disc_id,
         disc_title: &disc_title,
         main_dol: &gc_opts.nintendont_dol,
         apploader: &gc_opts.apploader,
@@ -380,6 +392,21 @@ fn run_gamecube(mut config: Config, work_dir: &Path) -> Result<Summary> {
     )
 }
 
+/// The `meta.xml` `drc_use` value for a platform. A Wii inject exposes the GamePad only as a
+/// pointer (`1`), or not at all (`0`). A GameCube/Nintendont inject drives the emulated game with
+/// the GamePad, so it must also set bit 16 (`0x10000`) — "GamePad usable as a controller in vWii" —
+/// giving `0x10001` (and `1` when the GamePad is disabled). This mirrors the reference injector,
+/// which writes `65537` for GameCube and `1` for Wii; without bit 16, vWii never hands Nintendont
+/// the GamePad. `textures_key` is `"gcn"` on the GameCube path and `"wii"` on the Wii path.
+fn drc_use_value(textures_key: &str, gamepad: bool) -> u32 {
+    match (textures_key, gamepad) {
+        ("gcn", true) => 0x0001_0001,
+        ("gcn", false) => 1,
+        (_, true) => 1,
+        (_, false) => 0,
+    }
+}
+
 /// Shared tail of both injection paths: regenerate `app.xml`/`meta.xml`, resolve the boot
 /// textures, package the WUP, and build the `Summary`. `textures_key` selects the boot-art
 /// repository convention (`"wii"` vs `"gcn"`, see [`resolve_textures`]); `after_package` runs
@@ -411,7 +438,7 @@ fn finish_package(
             short_name: &title,
             publisher: "",
             region: config.region.code(),
-            drc_use: config.gamepad,
+            drc_use: drc_use_value(textures_key, config.gamepad),
         },
     )?;
     std::fs::write(&meta_path, patched).map_err(|e| Error::io(&meta_path, e))?;
@@ -525,6 +552,16 @@ fn update_rvlt_tmd(tmd: &mut [u8], content_hash: &[u8; 20]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drc_use_is_gamepad_controller_on_gamecube_only() {
+        // GameCube drives the game with the GamePad, so it sets bit 16 (0x10001); Wii uses it only
+        // as a pointer (1). Disabling the GamePad drops to 1 (GC) / 0 (Wii).
+        assert_eq!(drc_use_value("gcn", true), 0x0001_0001);
+        assert_eq!(drc_use_value("gcn", false), 1);
+        assert_eq!(drc_use_value("wii", true), 1);
+        assert_eq!(drc_use_value("wii", false), 0);
+    }
 
     #[test]
     fn drc_uses_own_art_when_present() {

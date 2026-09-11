@@ -123,6 +123,16 @@ struct Cli {
     #[arg(long, value_name = "IMG")]
     apploader: Option<PathBuf>,
 
+    /// GameCube: 6-character id of the synthetic carrier disc (default: the game's own id; the
+    /// reference TeconMoon carrier disc uses CEMU69).
+    #[arg(long, value_name = "ID6")]
+    gc_disc_id: Option<String>,
+
+    /// GameCube: header title string of the synthetic carrier disc (default: --title; the
+    /// reference TeconMoon carrier disc uses "PunEmu 1.1").
+    #[arg(long, value_name = "STR")]
+    gc_disc_title: Option<String>,
+
     /// Force 16:9 widescreen.
     #[arg(long, help_heading = GC_NINCFG_HEADING)]
     widescreen: bool,
@@ -315,9 +325,17 @@ fn build_gc_options(cli: &Cli) -> Result<GameCubeOptions> {
         }
         None => Vec::new(),
     };
+    let disc_id = match &cli.gc_disc_id {
+        Some(id) => Some(<[u8; 6]>::try_from(id.as_bytes()).map_err(|_| {
+            anyhow!("--gc-disc-id must be exactly 6 ASCII characters (got {id:?})")
+        })?),
+        None => None,
+    };
     Ok(GameCubeOptions {
         nintendont_dol,
         apploader,
+        disc_id,
+        disc_title: cli.gc_disc_title.clone(),
         widescreen: cli.widescreen,
         language: cli.gc_language.into(),
         video_mode: cli.gc_video.into(),
