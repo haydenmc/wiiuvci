@@ -38,7 +38,9 @@ jobs:
         run: cargo build --workspace --all-targets --locked
 
       # Runs only the hermetic tests: the retail/NUS end-to-end tests are #[ignore]d,
-      # and fixture-gated tests no-op when .dev/ is absent (as it is on a clean checkout).
+      # and the fixture-gated tests are also #[ignore]d (they self-skip when .dev/ is
+      # absent, as it is on a clean checkout, but are marked #[ignore] so CI can't report
+      # them as passing with zero assertions).
       # Deliberately debug-mode (not --release): overflow checks are only active there, and
       # this suite is fast enough that the slower binary doesn't matter (see CLAUDE.md).
       - name: Test

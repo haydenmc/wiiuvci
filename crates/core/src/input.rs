@@ -958,6 +958,43 @@ mod tests {
         assert!(dol_size_from_header(&h, 0x1000).is_err());
     }
 
+    /// A zero-length extent always maps to `Ok(None)`, whatever its offset — including an offset
+    /// past `data_size`, which for any *non-zero* length would be rejected.
+    #[test]
+    fn extent_groups_zero_length_is_none_regardless_of_offset() {
+        let data_size = TEN_GROUPS * 0x7C00;
+        assert_eq!(extent_groups(0, 0, data_size).unwrap(), None);
+        assert_eq!(extent_groups(u64::MAX, 0, data_size).unwrap(), None);
+        assert_eq!(extent_groups(data_size + 1, 0, data_size).unwrap(), None);
+    }
+
+    /// A non-trivial extent's first/last group indices are computed correctly, an extent ending
+    /// exactly at `data_size` is accepted, one byte past is rejected, and an `off + len` overflow
+    /// is rejected rather than wrapping.
+    #[test]
+    fn extent_groups_bounds_and_group_math() {
+        let data_size = TEN_GROUPS * 0x7C00;
+
+        // Starts 100 bytes into group 2, spans 3 whole group-bytes: first group 2, last group 5
+        // (the range covers a sliver of group 5, since 3*GB + 100 crosses into it).
+        let off = 2 * GB + 100;
+        let len = 3 * GB;
+        let r = extent_groups(off, len, data_size).unwrap().unwrap();
+        assert_eq!(*r.start(), 2);
+        assert_eq!(*r.end(), 5);
+
+        // Ending exactly at data_size is in bounds.
+        assert!(extent_groups(data_size - 1, 1, data_size)
+            .unwrap()
+            .is_some());
+
+        // One byte past the end is rejected.
+        assert!(extent_groups(data_size - 1, 2, data_size).is_err());
+
+        // off + len overflowing u64 is rejected rather than wrapping.
+        assert!(extent_groups(u64::MAX, 2, data_size).is_err());
+    }
+
     #[test]
     fn fully_contained_groups_excludes_boundary_groups() {
         let gb = 64 * 0x7C00u64; // logical bytes per hash group

@@ -261,6 +261,91 @@ mod tests {
         );
     }
 
+    /// An FST that names a directory `..` and a file `../escape.txt` must not let extraction
+    /// write outside `out_dir`: `extract_title` returns `Err`, and nothing lands in `out_dir`'s
+    /// parent.
+    #[test]
+    fn extract_title_rejects_path_traversal_in_fst_names() {
+        let title_key = [0x5Au8; 16];
+        let file_data = b"hello".to_vec();
+
+        let fst = Fst {
+            offset_factor: 0x20,
+            contents: vec![],
+            nodes: vec![
+                FstNode {
+                    name: String::new(),
+                    kind: FstNodeKind::Dir {
+                        parent_index: 0,
+                        end_index: 3,
+                    },
+                    type_flags: 0,
+                    flags: 0,
+                    cluster: 0,
+                },
+                FstNode {
+                    name: "..".into(),
+                    kind: FstNodeKind::Dir {
+                        parent_index: 0,
+                        end_index: 2,
+                    },
+                    type_flags: 0,
+                    flags: 0,
+                    cluster: 0,
+                },
+                FstNode {
+                    name: "../escape.txt".into(),
+                    kind: FstNodeKind::File {
+                        offset: 0,
+                        size: file_data.len() as u64,
+                    },
+                    type_flags: 0,
+                    flags: 0,
+                    cluster: 1,
+                },
+            ],
+        };
+        let fst_bytes = fst.serialize();
+        let enc0 = encode_nonhashed(&title_key, 0, &fst_bytes);
+        let enc1 = encode_hashed(&title_key, 1, &file_data);
+        let records = vec![
+            ContentRecord {
+                id: 0,
+                index: 0,
+                content_type: TYPE_NONHASHED,
+                size: enc0.size,
+                hash: enc0.tmd_hash,
+            },
+            ContentRecord {
+                id: 1,
+                index: 1,
+                content_type: TYPE_HASHED,
+                size: enc1.size,
+                hash: enc1.tmd_hash,
+            },
+        ];
+        let reader = |id: u32| -> Result<Vec<u8>> {
+            Ok(match id {
+                0 => enc0.data.clone(),
+                1 => enc1.data.clone(),
+                _ => unreachable!(),
+            })
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let err = extract_title(&records, &title_key, &reader, &out_dir, |_| false).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidTitle(_)),
+            "expected a path-traversal rejection, got {err}"
+        );
+
+        // Nothing must have been written outside out_dir (i.e. into out_dir's parent).
+        assert!(!temp.path().join("escape.txt").exists());
+    }
+
     /// Extract a retail WUP (from .dev/wup_ref, needing title.tmd/tik + content .app 00..10;
     /// the hif contents 11/12 are skipped so aren't required) and confirm the extracted files
     /// match the base staged from the `.wua` in .dev/base byte-for-byte. This cross-validates

@@ -461,4 +461,104 @@ mod tests {
         let base = Path::new("/out");
         assert!(safe_join(base, "").is_err());
     }
+
+    /// `copy_tree` copies nested files and skips the base's own `hif_*.nfs` files, wherever they
+    /// appear in the tree.
+    #[test]
+    fn copy_tree_copies_nested_files_and_skips_hif() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("sub")).unwrap();
+        std::fs::write(src.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(src.path().join("sub/b.txt"), b"b").unwrap();
+        std::fs::write(src.path().join("hif_000000.nfs"), b"nfsdata").unwrap();
+        std::fs::write(src.path().join("sub/hif_000001.nfs"), b"nfsdata2").unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let dest_root = dst.path().join("out");
+        copy_tree(src.path(), &dest_root).unwrap();
+
+        assert_eq!(std::fs::read(dest_root.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dest_root.join("sub/b.txt")).unwrap(), b"b");
+        assert!(!dest_root.join("hif_000000.nfs").exists());
+        assert!(!dest_root.join("sub/hif_000001.nfs").exists());
+    }
+
+    /// `DirBase::new` accepts a root with `code/` directly under it, and one containing a single
+    /// `<title>/code/` subfolder (as produced by extracting a `.wua`).
+    #[test]
+    fn dirbase_new_finds_code_directly_or_one_level_down() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("code")).unwrap();
+        assert!(DirBase::new(dir.path()).is_ok());
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir2.path().join("SomeTitle_v0/code")).unwrap();
+        assert!(DirBase::new(dir2.path()).is_ok());
+    }
+
+    /// A directory with no `code/` anywhere (directly or one level down) is an `InvalidTitle`
+    /// error, not a read error.
+    #[test]
+    fn dirbase_new_errors_when_no_code_dir_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("random")).unwrap();
+        // `DirBase` holds no `Debug` impl, so match on the `Result` directly rather than
+        // `unwrap_err()` (which requires the `Ok` type to be `Debug`).
+        let Err(err) = DirBase::new(dir.path()) else {
+            panic!("expected an error for a directory with no code/ anywhere");
+        };
+        assert!(matches!(err, Error::InvalidTitle(_)), "got {err}");
+    }
+
+    /// A genuine read failure (here: the "directory" is actually a file, so `read_dir` fails) must
+    /// propagate as a real `Error::Io`, distinct from the generic "no code/ found" case.
+    #[test]
+    fn dirbase_new_propagates_a_real_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("not_a_dir");
+        std::fs::write(&file_path, b"x").unwrap();
+        let Err(err) = DirBase::new(&file_path) else {
+            panic!("expected an error when the base path is a file, not a directory");
+        };
+        assert!(
+            matches!(err, Error::Io { .. }),
+            "expected an I/O error, got {err}"
+        );
+    }
+
+    /// `open_base` dispatches on extension (case-insensitively) vs directory, and rejects
+    /// anything else outright.
+    #[test]
+    fn open_base_dispatches_on_extension_and_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("code")).unwrap();
+        assert!(open_base(dir.path()).is_ok());
+
+        // A `.wua` extension (any case) must dispatch to `WuaBase::open`, not the "must be a
+        // directory or a .wua archive" rejection — even though this particular file isn't a real
+        // archive and so fails for a different reason once opened.
+        let bogus_wua = dir.path().join("nope.WUA");
+        std::fs::write(&bogus_wua, b"not a real archive").unwrap();
+        // `Box<dyn BaseSource>` holds no `Debug` impl, so match on the `Result` directly rather
+        // than `unwrap_err()`.
+        let Err(err) = open_base(&bogus_wua) else {
+            panic!("expected a bogus .wua archive to fail opening");
+        };
+        assert!(
+            !err.to_string()
+                .contains("must be a directory or a .wua archive"),
+            "a .wua extension should dispatch to WuaBase::open: {err}"
+        );
+
+        // Anything else (not a directory, no .wua extension) is rejected outright.
+        let other = dir.path().join("something.bin");
+        std::fs::write(&other, b"x").unwrap();
+        let Err(err2) = open_base(&other) else {
+            panic!("expected a plain file with no .wua extension to be rejected");
+        };
+        assert!(matches!(err2, Error::InvalidTitle(_)), "got {err2}");
+        assert!(err2
+            .to_string()
+            .contains("must be a directory or a .wua archive"));
+    }
 }

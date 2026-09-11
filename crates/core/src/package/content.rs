@@ -734,6 +734,44 @@ mod tests {
         assert_cumulative_offsets(&parsed.contents);
     }
 
+    /// The content table's sector math for the small-tree fixture: every content's
+    /// `offset_sectors` is the running sum of the previous ones' sizes (`assert_cumulative_offsets`),
+    /// and every content's `size_sectors` is exactly `align_up(max(data_len, 1), SECTOR) / SECTOR`.
+    #[test]
+    fn plan_content_table_sector_math_matches_formula() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("code")).unwrap();
+        std::fs::create_dir_all(root.join("content/assets/shaders/cafe")).unwrap();
+        std::fs::create_dir_all(root.join("meta")).unwrap();
+        std::fs::write(root.join("code/app.xml"), b"<app/>").unwrap();
+        std::fs::write(root.join("code/cos.xml"), b"<cos/>").unwrap();
+        std::fs::write(root.join("code/frisbiiU.rpx"), vec![0u8; 100]).unwrap();
+        std::fs::write(
+            root.join("content/assets/shaders/cafe/banner.gsh"),
+            vec![1u8; 50],
+        )
+        .unwrap();
+        std::fs::write(root.join("content/hif_000000.nfs"), vec![2u8; 0x8000]).unwrap();
+        std::fs::write(root.join("meta/meta.xml"), b"<menu/>").unwrap();
+        std::fs::write(root.join("meta/iconTex.tga"), vec![3u8; 200]).unwrap();
+
+        let plan = plan(root, 0x00050002_534b4a45).unwrap();
+        let parsed = Fst::parse(&plan.fst).unwrap();
+        assert_eq!(parsed.contents.len(), plan.contents.len());
+
+        assert_cumulative_offsets(&parsed.contents);
+
+        for (fst_content, planned) in parsed.contents.iter().zip(&plan.contents) {
+            let expected = align_up(planned.data_len.max(1), SECTOR) / SECTOR;
+            assert_eq!(
+                fst_content.size_sectors as u64, expected,
+                "content {} size_sectors must be align_up(max(data_len,1), SECTOR)/SECTOR",
+                planned.index
+            );
+        }
+    }
+
     #[test]
     fn game_grouping_packs_up_to_the_cap_in_one_content() {
         let mut game = GameGrouping::new();

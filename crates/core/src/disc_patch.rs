@@ -462,6 +462,90 @@ mod tests {
         verify_group(&b, &h3b);
     }
 
+    /// Byte-pin the three partition-table patches: group table (0x40000, 0x20 bytes, group 0 has
+    /// one partition whose info table is at `0x40020 >> 2`, groups 1..3 zero), info table
+    /// (0x40020, 0x20 bytes, entry 0 = `{partition_offset >> 2, type 0}`, the remaining three
+    /// entries zero), and the region age-ratings zeroing (0x4E010, 0x10 bytes).
+    #[test]
+    fn partition_table_patches_byte_pin() {
+        let data_part_off = 0xF80_0000u64;
+        let patches = partition_table_patches(data_part_off);
+        assert_eq!(patches.len(), 3);
+
+        let (off0, groups) = &patches[0];
+        assert_eq!(*off0, 0x40000);
+        assert_eq!(groups.len(), 0x20);
+        assert_eq!(
+            &groups[0..4],
+            &1u32.to_be_bytes(),
+            "group 0 has one partition"
+        );
+        assert_eq!(
+            &groups[4..8],
+            &((0x40020u32) >> 2).to_be_bytes(),
+            "group 0's info table pointer"
+        );
+        assert!(
+            groups[8..].iter().all(|&b| b == 0),
+            "groups 1..3 must be empty"
+        );
+
+        let (off1, info) = &patches[1];
+        assert_eq!(*off1, 0x40020);
+        assert_eq!(info.len(), 0x20);
+        assert_eq!(
+            &info[0..4],
+            &((data_part_off >> 2) as u32).to_be_bytes(),
+            "partition offset >> 2"
+        );
+        assert_eq!(&info[4..8], &0u32.to_be_bytes(), "type 0 = DATA");
+        assert!(
+            info[8..].iter().all(|&b| b == 0),
+            "the remaining three info entries must be zero"
+        );
+
+        let (off2, ratings) = &patches[2];
+        assert_eq!(*off2, 0x4E010);
+        assert_eq!(ratings.len(), 0x10);
+        assert!(ratings.iter().all(|&b| b == 0));
+    }
+
+    /// An edit that straddles two clusters' 0x7C00 data windows lands at `HASH_BLOCK + within` in
+    /// each cluster it touches; an edit addressed to a different group leaves this group's
+    /// clusters completely untouched.
+    #[test]
+    fn apply_edits_to_group_straddles_cluster_boundary_and_ignores_other_groups() {
+        let g = 3u32;
+        let group_base = g as u64 * SECTORS_PER_GROUP as u64 * CLUSTER_DATA_U64;
+
+        // 4 bytes straddling the boundary between cluster 0 and cluster 1 of group g: the last
+        // two bytes of cluster 0's data window, then the first two of cluster 1's.
+        let edit_off = group_base + CLUSTER_DATA_U64 - 2;
+        let bytes = vec![0xAAu8, 0xBB, 0xCC, 0xDD];
+        let edits = vec![(edit_off, bytes)];
+
+        let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
+        apply_edits_to_group(&mut clusters, g, &edits);
+
+        let last = HASH_BLOCK + (CLUSTER_DATA_U64 as usize - 2);
+        assert_eq!(clusters[0][last], 0xAA);
+        assert_eq!(clusters[0][last + 1], 0xBB);
+        assert_eq!(clusters[1][HASH_BLOCK], 0xCC);
+        assert_eq!(clusters[1][HASH_BLOCK + 1], 0xDD);
+
+        // An edit addressed to a different group must not touch group g's clusters at all.
+        let mut untouched = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
+        let other_group_off = (g as u64 + 1) * SECTORS_PER_GROUP as u64 * CLUSTER_DATA_U64;
+        let other_edits = vec![(other_group_off, vec![0xFFu8; 4])];
+        apply_edits_to_group(&mut untouched, g, &other_edits);
+        for cluster in &untouched {
+            assert!(
+                cluster.iter().all(|&b| b == 0),
+                "group g must be untouched by another group's edit"
+            );
+        }
+    }
+
     /// Full end-to-end: patch Wii Sports' main.dol (all three patches), build the NFS, reopen it
     /// with `nod`'s hash validation, and confirm main.dol reads back patched with no hash error
     /// and the emitted TMD content hash matches the rebuilt H3 table. Needs the test title.

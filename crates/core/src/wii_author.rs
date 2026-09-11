@@ -950,6 +950,144 @@ mod tests {
         assert!(!disc_path.exists());
     }
 
+    /// Table test for [`fill_cluster_data`]: a cluster entirely in the sys blob, one straddling
+    /// the sys-blob/ISO boundary (`iso_off` mid-cluster), one entirely inside the ISO, one
+    /// straddling the ISO end (the tail must stay zero), and one entirely past the end.
+    #[test]
+    fn fill_cluster_data_table() {
+        let sys_blob: Vec<u8> = (0..40u8).collect(); // sys_blob[i] == i
+        let iso_data: Vec<u8> = (0..20u8).map(|i| 0x80 + i).collect();
+        let iso_off = 32u64;
+        let iso_size = iso_data.len() as u64; // ISO spans logical [32, 52)
+
+        struct Case {
+            name: &'static str,
+            logical_off: u64,
+            len: usize,
+            expect: Vec<u8>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "entirely in the sys blob",
+                logical_off: 0,
+                len: 16,
+                expect: sys_blob[0..16].to_vec(),
+            },
+            Case {
+                name: "straddles the sys-blob/ISO boundary",
+                logical_off: 24,
+                len: 16,
+                expect: {
+                    let mut v = sys_blob[24..32].to_vec();
+                    v.extend_from_slice(&iso_data[0..8]);
+                    v
+                },
+            },
+            Case {
+                name: "entirely inside the ISO",
+                logical_off: 36,
+                len: 8,
+                expect: iso_data[4..12].to_vec(),
+            },
+            Case {
+                name: "straddles the ISO end; tail stays zero",
+                logical_off: 48,
+                len: 16,
+                expect: {
+                    let mut v = iso_data[16..20].to_vec();
+                    v.extend(std::iter::repeat_n(0u8, 12));
+                    v
+                },
+            },
+            Case {
+                name: "entirely past the end",
+                logical_off: 64,
+                len: 16,
+                expect: vec![0u8; 16],
+            },
+        ];
+
+        for case in cases {
+            let mut dst = vec![0u8; case.len];
+            let mut iso_cur = Cursor::new(iso_data.clone());
+            fill_cluster_data(
+                &mut dst,
+                case.logical_off,
+                &sys_blob,
+                &mut iso_cur,
+                iso_off,
+                iso_size,
+            )
+            .unwrap();
+            assert_eq!(dst, case.expect, "case: {}", case.name);
+        }
+    }
+
+    /// The FST is 24 bytes of entries + 9 bytes of string table, padded to a 4-byte multiple
+    /// (36); the root entry count is 2; `game.iso`'s offset/size fields carry `iso_off >> 2` and
+    /// `iso_size`.
+    #[test]
+    fn build_fst_layout_and_fields() {
+        let iso_off = 0x1F_0000u64;
+        let iso_size = 0x1234_5678u64;
+        let fst = build_fst(iso_off, iso_size).unwrap();
+        assert_eq!(fst.len(), 36);
+
+        // Root directory entry: type=1, name_off=0, parent=0, arg1 = entry count (2).
+        assert_eq!(fst[0], 1);
+        assert_eq!(&fst[1..4], &[0, 0, 0]);
+        assert_eq!(&fst[4..8], &0u32.to_be_bytes());
+        assert_eq!(&fst[8..12], &2u32.to_be_bytes());
+
+        // game.iso entry: type=0, name_off=0, offset>>2, size.
+        assert_eq!(fst[12], 0);
+        assert_eq!(&fst[13..16], &[0, 0, 0]);
+        assert_eq!(&fst[16..20], &((iso_off >> 2) as u32).to_be_bytes());
+        assert_eq!(&fst[20..24], &(iso_size as u32).to_be_bytes());
+
+        // String table, padded to a 4-byte multiple.
+        assert_eq!(&fst[24..33], b"game.iso\0");
+        assert_eq!(&fst[33..36], &[0, 0, 0]);
+    }
+
+    /// `build_sys_blob` places `main.dol` 0x20-aligned after the apploader, the FST 0x20-aligned
+    /// after the DOL, `game.iso` at a `GROUP_LOGICAL_SIZE` (0x1F0000) multiple, and writes those
+    /// `>> 2` fields into boot.bin at 0x420/0x424/0x428/0x42C.
+    #[test]
+    fn build_sys_blob_layout_and_boot_fields() {
+        let game_id = *b"GM2E8P";
+        let apploader = vec![0xAAu8; 0x13]; // deliberately not 0x20-aligned in length
+        let main_dol = vec![0xBBu8; 0x101]; // deliberately not 0x20-aligned in length
+        let iso_size = 12_345u64;
+
+        let (sys, iso_off) =
+            build_sys_blob(&game_id, "Title", &apploader, &main_dol, iso_size).unwrap();
+
+        let dol_off = align_up(APPLOADER_OFF + apploader.len(), ALIGN);
+        assert_eq!(dol_off % ALIGN, 0);
+        assert_eq!(&sys[dol_off..dol_off + main_dol.len()], main_dol.as_slice());
+
+        let fst_off = align_up(dol_off + main_dol.len(), ALIGN);
+        assert_eq!(fst_off % ALIGN, 0);
+
+        assert_eq!(
+            iso_off % GROUP_LOGICAL_SIZE,
+            0,
+            "game.iso must land on a hash-group boundary"
+        );
+        assert!(iso_off >= fst_off as u64);
+
+        let field = |off: usize| -> u64 {
+            (u32::from_be_bytes(sys[off..off + 4].try_into().unwrap()) as u64) << 2
+        };
+        assert_eq!(field(BOOT_DOL_OFF_FIELD), dol_off as u64);
+        assert_eq!(field(BOOT_FST_OFF_FIELD), fst_off as u64);
+        let fst_len = align_up(2 * 12 + b"game.iso\0".len(), 4);
+        assert_eq!(field(BOOT_FST_SIZE_FIELD), fst_len as u64);
+        assert_eq!(field(BOOT_FST_MAX_FIELD), fst_len as u64);
+    }
+
     /// Full-size end-to-end: author a synthetic disc from a real GameCube image, pack to NFS, and
     /// re-validate the whole partition through `nod` with hash validation on — then extract
     /// `game.iso` back and confirm it is byte-identical to the source image. This is the strongest

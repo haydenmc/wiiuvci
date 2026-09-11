@@ -230,6 +230,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn patches_identifiers_and_names() {
         let Some(base) = base_meta_xml() else {
             eprintln!(
@@ -283,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn preserves_untouched_bytes_outside_targets() {
         let Some(base) = base_meta_xml() else {
             eprintln!(

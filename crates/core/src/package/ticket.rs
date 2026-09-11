@@ -120,6 +120,7 @@ mod tests {
     /// Reproduce a retail ticket body exactly (signature excluded) from its own title id and
     /// encrypted key.
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn reproduces_reference_ticket_body() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dev/wup_ref/title.tik");

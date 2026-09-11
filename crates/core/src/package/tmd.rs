@@ -168,10 +168,62 @@ mod tests {
         assert_eq!(&tmd[0x208..0x228], Sha256::digest(records).as_slice());
     }
 
+    /// A TMD shorter than the fixed header (`RECORDS_OFF + 2`) is rejected rather than panicking
+    /// on an out-of-bounds read.
+    #[test]
+    fn parse_content_records_rejects_tmd_shorter_than_header() {
+        let short = vec![0u8; RECORDS_OFF + 1];
+        let err = parse_content_records(&short).unwrap_err();
+        assert!(matches!(err, Error::InvalidTitle(_)), "got {err}");
+    }
+
+    /// A header whose declared content count claims more records than the buffer actually holds
+    /// is rejected.
+    #[test]
+    fn parse_content_records_rejects_count_past_buffer() {
+        let mut tmd = vec![0u8; RECORDS_OFF + 2];
+        tmd[0x1DE..0x1E0].copy_from_slice(&5u16.to_be_bytes()); // claims 5 records, none present
+        let err = parse_content_records(&tmd).unwrap_err();
+        assert!(matches!(err, Error::InvalidTitle(_)), "got {err}");
+    }
+
+    /// A well-formed TMD (built via [`build_tmd`]) round-trips every content-record field through
+    /// `parse_content_records`.
+    #[test]
+    fn parse_content_records_round_trips_a_well_formed_tmd() {
+        let contents = vec![
+            ContentRecord {
+                id: 0x10,
+                index: 0,
+                content_type: 0x2001,
+                size: 0x8000,
+                hash: [7u8; 20],
+            },
+            ContentRecord {
+                id: 0x11,
+                index: 1,
+                content_type: 0x2003,
+                size: 0x0012_3456,
+                hash: [9u8; 20],
+            },
+        ];
+        let tmd = build_tmd(0x0005000252535045, 0x5045, &contents);
+        let parsed = parse_content_records(&tmd).unwrap();
+        assert_eq!(parsed.len(), contents.len());
+        for (p, c) in parsed.iter().zip(&contents) {
+            assert_eq!(p.id, c.id);
+            assert_eq!(p.index, c.index);
+            assert_eq!(p.content_type, c.content_type);
+            assert_eq!(p.size, c.size);
+            assert_eq!(p.hash, c.hash);
+        }
+    }
+
     /// Rebuild a retail TMD's body from its own content records and confirm we reproduce the
     /// header, info table and records byte-for-byte (the signature is fakesigned/zeroed, so
     /// only bytes from 0x140 onward are compared).
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn reproduces_reference_tmd_body() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dev/wup_ref/title.tmd");

@@ -80,7 +80,44 @@ mod tests {
         assert!(CertChain::from_bytes(vec![0u8; 100]).is_err());
     }
 
+    /// The right size but an out-of-range signature type is rejected.
     #[test]
+    fn from_bytes_rejects_bad_signature_type() {
+        let mut bytes = vec![0u8; EXPECTED_CERT_LEN];
+        bytes[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        bytes[100..115].copy_from_slice(ROOT_CA_ISSUER);
+        // `CertChain` holds no `Debug` impl, so match on the `Result` directly rather than
+        // `unwrap_err()` (which requires the `Ok` type to be `Debug`).
+        let Err(err) = CertChain::from_bytes(bytes) else {
+            panic!("expected an out-of-range signature type to be rejected");
+        };
+        assert!(matches!(err, Error::InvalidTitle(_)), "got {err}");
+    }
+
+    /// A valid signature type but no `Root-CA00000003` issuer string anywhere in the chain is
+    /// rejected.
+    #[test]
+    fn from_bytes_rejects_missing_root_ca_issuer() {
+        let mut bytes = vec![0u8; EXPECTED_CERT_LEN];
+        bytes[0..4].copy_from_slice(&0x0001_0001u32.to_be_bytes());
+        let Err(err) = CertChain::from_bytes(bytes) else {
+            panic!("expected a chain with no Root-CA00000003 issuer to be rejected");
+        };
+        assert!(matches!(err, Error::InvalidTitle(_)), "got {err}");
+    }
+
+    /// The right size, a valid signature type, and the issuer string present: accepted.
+    #[test]
+    fn from_bytes_accepts_a_valid_chain() {
+        let mut bytes = vec![0u8; EXPECTED_CERT_LEN];
+        bytes[0..4].copy_from_slice(&0x0001_0001u32.to_be_bytes());
+        bytes[200..200 + ROOT_CA_ISSUER.len()].copy_from_slice(ROOT_CA_ISSUER);
+        let chain = CertChain::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(chain.as_bytes(), bytes.as_slice());
+    }
+
+    #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn accepts_reference_cert() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.dev/wup_ref/title.cert");

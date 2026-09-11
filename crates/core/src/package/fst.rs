@@ -365,6 +365,7 @@ mod tests {
     /// Parse a retail title's decrypted FST and confirm our serializer reproduces it exactly
     /// (up to the trailing content padding). This is the definitive format check.
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn reproduces_reference_fst_byte_for_byte() {
         let path = reference_fst_path();
         if !path.exists() {
