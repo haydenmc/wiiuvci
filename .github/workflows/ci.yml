@@ -18,7 +18,7 @@ jobs:
     name: fmt / clippy / build / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,7 +50,7 @@ jobs:
     name: MSRV check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The workspace declares rust-version = "1.88" (Cargo.toml); verify it still builds on
       # exactly that toolchain, since the `test` job above only proves `stable` works.
