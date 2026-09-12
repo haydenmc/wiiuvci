@@ -1,5 +1,5 @@
 [package]
-name = "wiivci-core"
+name = "wiiuvci-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

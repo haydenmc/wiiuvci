@@ -7,17 +7,17 @@
 //!
 //! Run with:
 //! ```sh
-//! WIIU_COMMON_KEY=<32-hex> cargo test -p wiivci-core --release --test gamecube_e2e -- --ignored
+//! WIIU_COMMON_KEY=<32-hex> cargo test -p wiiuvci-core --release --test gamecube_e2e -- --ignored
 //! ```
 
 use std::path::Path;
 
-use wiivci_core::base::open_base;
-use wiivci_core::keys::WiiUCommonKey;
-use wiivci_core::nincfg::{Language, VideoMode};
-use wiivci_core::package::cert::CertChain;
-use wiivci_core::pipeline::{self, Config, GameCubeOptions, Region};
-use wiivci_core::video::VideoPatches;
+use wiiuvci_core::base::open_base;
+use wiiuvci_core::keys::WiiUCommonKey;
+use wiiuvci_core::nincfg::{Language, VideoMode};
+use wiiuvci_core::package::cert::CertChain;
+use wiiuvci_core::pipeline::{self, Config, GameCubeOptions, Region};
+use wiiuvci_core::video::VideoPatches;
 
 #[test]
 #[ignore = "needs .wua base, .dev/wup_ref/title.cert and WIIU_COMMON_KEY; reads/writes several GB"]

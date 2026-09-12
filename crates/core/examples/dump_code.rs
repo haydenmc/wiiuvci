@@ -1,16 +1,16 @@
 //! Decrypt a WUP title dir and extract its files (code/, content/, meta/) to an output dir.
-//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiivci-core --release --example dump_code -- <wup_dir> <out_dir>
+//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiiuvci-core --release --example dump_code -- <wup_dir> <out_dir>
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::extract::{ContentReader, extract_title};
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::extract::{ContentReader, extract_title};
+use wiiuvci_core::package::tmd::parse_content_records;
 
 struct DirReader<'a>(&'a Path);
 impl ContentReader for DirReader<'_> {
-    fn read(&self, id: u32) -> wiivci_core::error::Result<Vec<u8>> {
+    fn read(&self, id: u32) -> wiiuvci_core::error::Result<Vec<u8>> {
         common::read_app(self.0, id)
-            .map_err(|e| wiivci_core::error::Error::InvalidTitle(e.to_string()))
+            .map_err(|e| wiiuvci_core::error::Error::InvalidTitle(e.to_string()))
     }
 }
 

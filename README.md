@@ -1,4 +1,4 @@
-# wiivci
+# wiiuvci
 
 A CLI that injects Wii games (ISO/RVZ/WBFS/…) **and GameCube games (via
 [Nintendont](https://github.com/FIX94/Nintendont))** into Wii U Virtual Console titles —
@@ -34,7 +34,7 @@ shell history:
 
 ```sh
 export WIIU_COMMON_KEY=<32-hex>   # or: --wiiu-common-key /path/to/key/file
-wiivci \
+wiiuvci \
   --input "Wii Sports (USA).rvz" \
   --base  "Rhythm Heaven Fever [00050000101B0700].wua" \
   --out   ./out \
@@ -94,7 +94,7 @@ Point `--input` at a GameCube image (ISO/GCM/CISO/NKit/GCZ/RVZ — anything `nod
 tool switches to the GameCube path automatically (or force it with `--gamecube`):
 
 ```sh
-wiivci \
+wiiuvci \
   --input "Super Monkey Ball 2 (USA).rvz" \
   --base  "Rhythm Heaven Fever [00050000101B0700].wua" \
   --out   ./out \
@@ -162,7 +162,7 @@ encrypted title key (as found in title-key databases — NUS does not serve tick
 titles):
 
 ```sh
-wiivci \
+wiiuvci \
   --input "Wii Sports (USA).rvz" \
   --base-title-id  00050000101B0700 \
   --base-title-key <32-hex encrypted title key> \
@@ -196,7 +196,7 @@ pins a TMD version and `--nus-url <url>` points at a mirror.
 Requires a Rust toolchain (1.88+) and a C compiler (for `nod`'s compression backends).
 
 ```sh
-cargo build --release   # binary at target/release/wiivci
+cargo build --release   # binary at target/release/wiiuvci
 cargo test              # fast unit/format tests
 ```
 

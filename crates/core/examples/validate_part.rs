@@ -1,6 +1,6 @@
 //! Open a recon'd disc with Wii-hash validation ENABLED and read the whole data partition,
 //! reporting the first offset where a hash check fails (mirrors Nintendont's hash-verified DI read).
-//! Run: cargo run -p wiivci-core --release --example validate_part -- <recon_dir> [read_len_hex]
+//! Run: cargo run -p wiiuvci-core --release --example validate_part -- <recon_dir> [read_len_hex]
 mod common;
 
 use std::io::{Read, Seek, SeekFrom};

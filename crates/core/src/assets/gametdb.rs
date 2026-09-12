@@ -31,7 +31,7 @@ fn cache_dir_name() -> String {
             }
         })
         .collect();
-    format!("wiivci-{sanitized}")
+    format!("wiiuvci-{sanitized}")
 }
 
 /// The per-user cache directory, created (and, on unix, locked down to owner-only) on demand.

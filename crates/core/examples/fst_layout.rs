@@ -1,7 +1,7 @@
 //! Dev utility: report the data-partition file layout of a Wii disc.
 //! Prints partition data size vs. the highest file end offset (to distinguish
 //! "trailing padding only" from "gap with files near the end").
-//! Run: cargo run -p wiivci-core --release --example fst_layout -- <disc>
+//! Run: cargo run -p wiiuvci-core --release --example fst_layout -- <disc>
 mod common;
 
 use std::path::Path;

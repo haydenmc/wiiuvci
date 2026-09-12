@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use anyhow::Context;
-use wiivci_core::keys::WiiUCommonKey;
-use wiivci_core::package::ticket::decrypt_title_key;
+use wiiuvci_core::keys::WiiUCommonKey;
+use wiiuvci_core::package::ticket::decrypt_title_key;
 
 /// Dummy title key used by examples that repackage/inspect content without a real ticket
 /// (e.g. re-running `build_package`/`decode_hashed` on already-staged data).
