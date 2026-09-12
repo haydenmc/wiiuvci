@@ -10,8 +10,8 @@ A single-binary Rust reimplementation of the Wii/GameCube → Wii U Virtual Cons
 
 ## Workspace
 
-- `crates/core` — `wiivci-core` (all the logic: disc reading, NFS, hash tree, WUP packaging).
-- `crates/cli` — `wiivci` (the CLI).
+- `crates/core` — `wiiuvci-core` (all the logic: disc reading, NFS, hash tree, WUP packaging).
+- `crates/cli` — `wiiuvci` (the CLI).
 - Rust edition 2024, toolchain 1.88+ (the `rust-version` in `Cargo.toml`; the CI MSRV job keeps
   it honest). `crates/core/examples/` holds read-only diagnostic tools (`fst_layout`, `disc_cmp`,
   `recon_disc`, …) — handy oracles when debugging a disc.
@@ -55,7 +55,7 @@ WIIU_COMMON_KEY=<32-hex> cargo test --workspace --release -- --ignored
 - Key oracles: `nfs::tests::nfs_rebuilds_valid_wii_hashes` (sparse NFS round-trips through `nod`'s
   hash validation), `package/content_crypto` retail byte-match, `nfs::tests::zero_trim_shrinks_nfs`.
 - Measuring peak RSS: after switching branches, **rebuild before measuring** — a stale
-  `target/release/wiivci` from another branch will give wrong numbers.
+  `target/release/wiiuvci` from another branch will give wrong numbers.
 
 ## Architecture map
 

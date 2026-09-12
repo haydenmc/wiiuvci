@@ -1,12 +1,12 @@
 //! Thoroughly verify one hashed WUP content: decode it, recompute the full H0..H3 tree from the
 //! decoded data, and check (a) every block's embedded H0/H1/H2 header matches, (b) SHA1(.h3)
 //! equals the TMD content hash, (c) the recomputed H3 equals the .h3 file.
-//! Run: cargo run -p wiivci-core --release --example verify_content -- <wup_dir> <content_index>
+//! Run: cargo run -p wiiuvci-core --release --example verify_content -- <wup_dir> <content_index>
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::content_crypto::{decode_hashed, encode_hashed};
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::content_crypto::{decode_hashed, encode_hashed};
+use wiiuvci_core::package::tmd::parse_content_records;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

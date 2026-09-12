@@ -45,10 +45,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            archive: wiivci-${{ github.ref_name }}-x86_64-linux.tar.gz
+            archive: wiiuvci-${{ github.ref_name }}-x86_64-linux.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: wiivci-${{ github.ref_name }}-x86_64-windows.zip
+            archive: wiiuvci-${{ github.ref_name }}-x86_64-windows.zip
     steps:
       - uses: actions/checkout@v7
 
@@ -70,13 +70,13 @@ jobs:
         env:
           # nod pulls in C compression backends; steer the cc crate at the musl compiler.
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked --target ${{ matrix.target }} -p wiivci
+        run: cargo build --release --locked --target ${{ matrix.target }} -p wiiuvci
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           tar czf "${{ matrix.archive }}" \
-            -C "target/${{ matrix.target }}/release" wiivci \
+            -C "target/${{ matrix.target }}/release" wiiuvci \
             -C "${{ github.workspace }}" README.md LICENSE
 
       - name: Package (Windows)
@@ -84,7 +84,7 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path `
-            "target/${{ matrix.target }}/release/wiivci.exe", `
+            "target/${{ matrix.target }}/release/wiiuvci.exe", `
             "README.md", "LICENSE" `
             -DestinationPath "${{ matrix.archive }}"
 
@@ -109,7 +109,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            wiivci-*-x86_64-linux.tar.gz
-            wiivci-*-x86_64-windows.zip
+            wiiuvci-*-x86_64-linux.tar.gz
+            wiiuvci-*-x86_64-windows.zip
           generate_release_notes: true
           fail_on_unmatched_files: true

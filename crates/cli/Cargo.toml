@@ -1,5 +1,5 @@
 [package]
-name = "wiivci"
+name = "wiiuvci"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,11 @@ rust-version.workspace = true
 description = "CLI to inject Wii games into Wii U Virtual Console (WUP) packages"
 
 [[bin]]
-name = "wiivci"
+name = "wiiuvci"
 path = "src/main.rs"
 
 [dependencies]
-wiivci-core = { path = "../core" }
+wiiuvci-core = { path = "../core" }
 anyhow.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 env_logger = "0.11"

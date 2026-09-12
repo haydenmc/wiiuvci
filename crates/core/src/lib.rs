@@ -1,4 +1,4 @@
-//! wiivci-core: library for injecting Wii games into Wii U Virtual Console (WUP) packages.
+//! wiiuvci-core: library for injecting Wii games into Wii U Virtual Console (WUP) packages.
 //!
 //! The pipeline reads a Wii disc image (ISO/RVZ/… via [`nod`]), converts the decrypted
 //! disc into the Wii U VC NFS format, merges it with a user-supplied base title, and

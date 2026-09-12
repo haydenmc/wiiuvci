@@ -1,21 +1,21 @@
 //! Pull the carrier-disc template pieces out of a known-good GameCube inject (e.g. a TeconMoon
 //! package): its `apploader.img` and forwarder `main.dol`, plus the disc id/title, so the same
-//! pieces can be fed to `wiivci --apploader … --nintendont … --gc-disc-id … --gc-disc-title …`.
-//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiivci-core --release --example gc_template_extract -- <wup_dir> <out_dir>
+//! pieces can be fed to `wiiuvci --apploader … --nintendont … --gc-disc-id … --gc-disc-title …`.
+//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiiuvci-core --release --example gc_template_extract -- <wup_dir> <out_dir>
 mod common;
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use nod::PartitionKind;
-use wiivci_core::package::extract::{ContentReader, extract_title};
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::extract::{ContentReader, extract_title};
+use wiiuvci_core::package::tmd::parse_content_records;
 
 struct DirReader<'a>(&'a Path);
 impl ContentReader for DirReader<'_> {
-    fn read(&self, id: u32) -> wiivci_core::error::Result<Vec<u8>> {
+    fn read(&self, id: u32) -> wiiuvci_core::error::Result<Vec<u8>> {
         common::read_app(self.0, id)
-            .map_err(|e| wiivci_core::error::Error::InvalidTitle(e.to_string()))
+            .map_err(|e| wiiuvci_core::error::Error::InvalidTitle(e.to_string()))
     }
 }
 

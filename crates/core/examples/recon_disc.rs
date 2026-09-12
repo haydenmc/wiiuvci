@@ -1,12 +1,12 @@
 //! Dev utility: reconstruct the mountable NFS/disc from a WUP package directory, so it can be
 //! reopened with `nod` and compared structurally against another disc.
 //! Writes <out>/content/hif_%06d.nfs and <out>/code/htk.bin (the layout nod's NFS reader wants).
-//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiivci-core --release --example recon_disc -- <wup_dir> <out_dir>
+//! Run: WIIU_COMMON_KEY=<32hex or key file> cargo run -p wiiuvci-core --release --example recon_disc -- <wup_dir> <out_dir>
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::extract::extract_title;
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::extract::extract_title;
+use wiiuvci_core::package::tmd::parse_content_records;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -25,9 +25,9 @@ fn main() -> anyhow::Result<()> {
     );
 
     let records = parse_content_records(&tmd)?;
-    let reader = |id: u32| -> wiivci_core::error::Result<Vec<u8>> {
+    let reader = |id: u32| -> wiiuvci_core::error::Result<Vec<u8>> {
         common::read_app(wup, id)
-            .map_err(|e| wiivci_core::error::Error::InvalidTitle(e.to_string()))
+            .map_err(|e| wiiuvci_core::error::Error::InvalidTitle(e.to_string()))
     };
     std::fs::create_dir_all(out)?;
     // Extract everything, including hif_*.nfs (skip nothing).

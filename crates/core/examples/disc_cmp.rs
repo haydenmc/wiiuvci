@@ -2,7 +2,7 @@
 //! contents (by name) against a reference disc (e.g. TeconMoon's reconstructed disc). This
 //! isolates data-correctness (do the files' bytes match?) from layout/compaction (offsets differ).
 //!
-//! Run: cargo run -p wiivci-core --release --example disc_cmp -- <source.rvz> <ref_hif.nfs> <workdir>
+//! Run: cargo run -p wiiuvci-core --release --example disc_cmp -- <source.rvz> <ref_hif.nfs> <workdir>
 mod common;
 
 use std::collections::HashMap;
@@ -10,10 +10,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use nod::{Disc, PartitionKind};
-use wiivci_core::disc_patch::plan_disc;
-use wiivci_core::input::SourceDisc;
-use wiivci_core::nfs::build_nfs;
-use wiivci_core::video::VideoPatches;
+use wiiuvci_core::disc_patch::plan_disc;
+use wiiuvci_core::input::SourceDisc;
+use wiiuvci_core::nfs::build_nfs;
+use wiiuvci_core::video::VideoPatches;
 
 /// name -> (logical offset, length)
 fn file_map(disc: &Disc) -> (bool, HashMap<String, (u64, u64)>) {

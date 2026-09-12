@@ -1,7 +1,7 @@
 //! Measure how sparsely a Wii disc's data partition is populated: coalesce all FST file extents
 //! into contiguous runs (at 64-cluster hash-group granularity) and report how many EGGS ranges a
 //! sparse NFS would need (limit is 61) and how many bytes it would store.
-//! Run: cargo run -p wiivci-core --release --example frag -- <disc>
+//! Run: cargo run -p wiiuvci-core --release --example frag -- <disc>
 mod common;
 
 use std::path::Path;

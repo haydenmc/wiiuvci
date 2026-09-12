@@ -25,7 +25,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// multi-hundred-MB content downloads.
 pub(crate) fn http_client(read_timeout: Duration) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .user_agent("wiivci")
+        .user_agent("wiiuvci")
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(read_timeout)
         .build()

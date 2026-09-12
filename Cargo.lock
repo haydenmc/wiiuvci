@@ -1881,7 +1881,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wiivci"
+name = "wiiuvci"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1889,11 +1889,11 @@ dependencies = [
  "env_logger",
  "log",
  "tempfile",
- "wiivci-core",
+ "wiiuvci-core",
 ]
 
 [[package]]
-name = "wiivci-core"
+name = "wiiuvci-core"
 version = "0.1.0"
 dependencies = [
  "aes",

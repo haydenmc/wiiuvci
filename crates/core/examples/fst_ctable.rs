@@ -1,11 +1,11 @@
 //! Decode content 0 (the FST) of a WUP package and dump its content table (secondary headers).
-//! Run: cargo run -p wiivci-core --release --example fst_ctable -- <wup_dir>
+//! Run: cargo run -p wiiuvci-core --release --example fst_ctable -- <wup_dir>
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::content_crypto::{decode_hashed, decode_nonhashed};
-use wiivci_core::package::fst::Fst;
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::content_crypto::{decode_hashed, decode_nonhashed};
+use wiiuvci_core::package::fst::Fst;
+use wiiuvci_core::package::tmd::parse_content_records;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

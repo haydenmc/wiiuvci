@@ -1,4 +1,4 @@
-//! `wiivci` — inject a Wii game into a Wii U Virtual Console (WUP) package.
+//! `wiiuvci` — inject a Wii game into a Wii U Virtual Console (WUP) package.
 //!
 //! Copyright (C) 2026 Hayden. Licensed under the GNU General Public License, version 3 or
 //! later. This program comes with ABSOLUTELY NO WARRANTY. See the LICENSE file for details.
@@ -9,19 +9,19 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, anyhow};
 use clap::{ArgGroup, Parser, ValueEnum};
 
-use wiivci_core::assets::nintendont;
-use wiivci_core::base::{BaseSource, open_base};
-use wiivci_core::input::{DiscKind, probe};
-use wiivci_core::keys::WiiUCommonKey;
-use wiivci_core::nincfg::{Language, VideoMode};
-use wiivci_core::nus::{NusBase, NusClient};
-use wiivci_core::package::cert::CertChain;
-use wiivci_core::pipeline::{self, Config, GameCubeOptions, Region};
-use wiivci_core::video::VideoPatches;
+use wiiuvci_core::assets::nintendont;
+use wiiuvci_core::base::{BaseSource, open_base};
+use wiiuvci_core::input::{DiscKind, probe};
+use wiiuvci_core::keys::WiiUCommonKey;
+use wiiuvci_core::nincfg::{Language, VideoMode};
+use wiiuvci_core::nus::{NusBase, NusClient};
+use wiiuvci_core::package::cert::CertChain;
+use wiiuvci_core::pipeline::{self, Config, GameCubeOptions, Region};
+use wiiuvci_core::video::VideoPatches;
 
 /// Inject a Wii game (ISO/RVZ) into an installable Wii U Virtual Console package.
 #[derive(Parser, Debug)]
-#[command(name = "wiivci", version, about)]
+#[command(name = "wiiuvci", version, about)]
 #[command(group(ArgGroup::new("base_src").required(true).args(["base", "base_title_id"])))]
 struct Cli {
     /// Source Wii disc image (ISO, RVZ, WBFS, …).
@@ -594,7 +594,7 @@ mod gc_flag_tests {
     /// Minimal valid argv; append GC flags per test.
     fn parse(extra: &[&str]) -> Cli {
         let mut argv = vec![
-            "wiivci",
+            "wiiuvci",
             "-i",
             "game.rvz",
             "-b",
@@ -651,7 +651,7 @@ mod gc_flag_tests {
         assert!(parse_memcard_size("0").is_err());
         assert!(
             Cli::try_parse_from([
-                "wiivci",
+                "wiiuvci",
                 "-i",
                 "g",
                 "-b",
@@ -673,7 +673,7 @@ mod gc_flag_tests {
     fn out_of_range_pads_and_slot_are_rejected() {
         for bad in [["--gc-max-pads", "5"], ["--gc-gamepad-slot", "4"]] {
             let mut argv = vec![
-                "wiivci",
+                "wiiuvci",
                 "-i",
                 "g",
                 "-b",
@@ -768,7 +768,7 @@ mod ignored_flag_tests {
 
     fn parse(extra: &[&str]) -> Cli {
         let mut argv = vec![
-            "wiivci",
+            "wiiuvci",
             "-i",
             "game.rvz",
             "-b",
@@ -810,9 +810,9 @@ mod config_from_cli_tests {
 
     use clap::Parser;
 
-    use wiivci_core::base::{BaseSource, StagedBase};
-    use wiivci_core::package::cert::EXPECTED_CERT_LEN;
-    use wiivci_core::{Error, Result as CoreResult};
+    use wiiuvci_core::base::{BaseSource, StagedBase};
+    use wiiuvci_core::package::cert::EXPECTED_CERT_LEN;
+    use wiiuvci_core::{Error, Result as CoreResult};
 
     use super::{CertChain, Cli, WiiUCommonKey, build_gc_options, config_from_cli};
 
@@ -844,7 +844,7 @@ mod config_from_cli_tests {
 
     fn parse(extra: &[&str]) -> Cli {
         let mut argv = vec![
-            "wiivci",
+            "wiiuvci",
             "-i",
             "game.rvz",
             "-b",

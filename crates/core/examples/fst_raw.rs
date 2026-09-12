@@ -1,9 +1,9 @@
 //! Parse an already-decrypted package FST (e.g. .dev/wup_ref/fst_decrypted.bin) and dump the
-//! file -> content mapping. Run: cargo run -p wiivci-core --release --example fst_raw -- <fst.bin>
+//! file -> content mapping. Run: cargo run -p wiiuvci-core --release --example fst_raw -- <fst.bin>
 mod common;
 
-use wiivci_core::package::extract::node_paths;
-use wiivci_core::package::fst::{Fst, FstNodeKind};
+use wiiuvci_core::package::extract::node_paths;
+use wiiuvci_core::package::fst::{Fst, FstNodeKind};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -452,7 +452,7 @@ mod tests {
     // --- Cross-validation against a retail package ------------------------------------
     // These require the extracted reference in .dev/wup_ref and the Wii U common key in the
     // WIIU_COMMON_KEY env var (never stored). Run:
-    //   WIIU_COMMON_KEY=<hex> cargo test -p wiivci-core --release -- --ignored retail
+    //   WIIU_COMMON_KEY=<hex> cargo test -p wiiuvci-core --release -- --ignored retail
     #[test]
     fn encode_decode_round_trips() {
         let key = [0x5Au8; 16];

@@ -1,12 +1,12 @@
 //! Dump the package FST (content 0): each file's path -> content index, offset, size.
-//! Run: cargo run -p wiivci-core --release --example fst_files -- <wup_dir>
+//! Run: cargo run -p wiiuvci-core --release --example fst_files -- <wup_dir>
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::content_crypto::{decode_hashed, decode_nonhashed};
-use wiivci_core::package::extract::node_paths;
-use wiivci_core::package::fst::{Fst, FstNodeKind};
-use wiivci_core::package::tmd::parse_content_records;
+use wiiuvci_core::package::content_crypto::{decode_hashed, decode_nonhashed};
+use wiiuvci_core::package::extract::node_paths;
+use wiiuvci_core::package::fst::{Fst, FstNodeKind};
+use wiiuvci_core::package::tmd::parse_content_records;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

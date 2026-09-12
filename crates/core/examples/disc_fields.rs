@@ -1,7 +1,7 @@
 //! Print the boot-relevant fields of any Wii disc `nod` can open (RVZ/ISO or an NFS `hif_000000.nfs`):
 //! disc header, partition table, region, 0x4FFFC magic, partition header offsets, ticket/TMD key
 //! fields, boot.bin offsets, bi2, apploader header. `--base <wua>` materializes a base title's own
-//! NFS first. Run: cargo run -p wiivci-core --release --example disc_fields -- <disc|hif> | --base <wua> <scratch>
+//! NFS first. Run: cargo run -p wiiuvci-core --release --example disc_fields -- <disc|hif> | --base <wua> <scratch>
 mod common;
 
 use std::io::{Read, Seek, SeekFrom};
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     );
     let path: PathBuf = if args[0] == "--base" {
         common::usage_or_exit(&args, 3, "usage: disc_fields --base <wua> <scratch>");
-        let mut base = wiivci_core::base::open_base(&args[1])?;
+        let mut base = wiiuvci_core::base::open_base(&args[1])?;
         let dir = base
             .materialize_original_nfs(std::path::Path::new(&args[2]))?
             .ok_or_else(|| anyhow::anyhow!("base has no NFS"))?;

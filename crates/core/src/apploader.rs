@@ -5,7 +5,7 @@
 //! offset 0x2440 (`boot.bin | bi2.bin | apploader | …`). When the user does not supply
 //! `--apploader`, the GameCube path takes this one. That matches the reference tools
 //! (TeconMoon/UWUVCI), which rebuild the base's own disc with `wit`/`nfs2iso2nfs` and so inherit
-//! its apploader implicitly; because wiivci authors the synthetic disc clean-room instead, the
+//! its apploader implicitly; because wiiuvci authors the synthetic disc clean-room instead, the
 //! apploader has to be recovered from the base explicitly.
 
 use std::io::{Read, Seek, SeekFrom};
