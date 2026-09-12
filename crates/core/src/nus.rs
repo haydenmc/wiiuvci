@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::assets::http_client;
-use crate::base::{finalize_stage, is_base_game_nfs, BaseSource, StagedBase};
+use crate::base::{BaseSource, StagedBase, finalize_stage, is_base_game_nfs};
 use crate::error::{Error, Result};
 use crate::package::extract::extract_title;
 use crate::package::ticket::decrypt_title_key;
@@ -72,13 +72,13 @@ impl NusClient {
                 resp.status()
             )));
         }
-        if let Some(len) = resp.content_length() {
-            if len > MAX_RESPONSE_BYTES {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "GET {url}: Content-Length {len} exceeds the {MAX_RESPONSE_BYTES}-byte sanity \
-                     limit; refusing to download it"
-                )));
-            }
+        if let Some(len) = resp.content_length()
+            && len > MAX_RESPONSE_BYTES
+        {
+            return Err(Error::Other(anyhow::anyhow!(
+                "GET {url}: Content-Length {len} exceeds the {MAX_RESPONSE_BYTES}-byte sanity \
+                 limit; refusing to download it"
+            )));
         }
         // Stream the body via `Read` rather than `Response::bytes()`: `bytes()` runs the whole
         // body download under the client's single `timeout`, so any content that takes longer

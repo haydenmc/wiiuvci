@@ -36,7 +36,7 @@ const OFF_VIDEOMODE: usize = 0x00C;
 const OFF_LANGUAGE: usize = 0x010;
 const OFF_GAMEPATH: usize = 0x014; // char[255]
 const OFF_CHEATPATH: usize = 0x113; // char[255]
-                                    // 0x212..0x214: alignment padding (see the module docs).
+// 0x212..0x214: alignment padding (see the module docs).
 const OFF_MAXPADS: usize = 0x214;
 const OFF_GAMEID: usize = 0x218; // 4 ASCII bytes
 const OFF_MEMCARDBLOCKS: usize = 0x21C;
@@ -477,13 +477,15 @@ mod tests {
             );
         }
         // The documented maxima themselves must still be accepted.
-        assert!(generate(&NincfgOptions {
-            max_pads: 4,
-            memcard_blocks: 4,
-            wiiu_gamepad_slot: 3,
-            ..Default::default()
-        })
-        .is_ok());
+        assert!(
+            generate(&NincfgOptions {
+                max_pads: 4,
+                memcard_blocks: 4,
+                wiiu_gamepad_slot: 3,
+                ..Default::default()
+            })
+            .is_ok()
+        );
     }
 
     /// A cheat path that does not fit the fixed `char[255]` field would be truncated into a

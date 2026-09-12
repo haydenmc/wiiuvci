@@ -388,7 +388,7 @@ mod tests {
         iv[..8].copy_from_slice(&title_id.to_be_bytes());
         let mut title_key = [0u8; 16];
         title_key.copy_from_slice(&tik[0x1BF..0x1CF]);
-        use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+        use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
         <cbc::Decryptor<aes::Aes128>>::new(&common.into(), &iv.into())
             .decrypt_padded_mut::<NoPadding>(&mut title_key)
             .unwrap();

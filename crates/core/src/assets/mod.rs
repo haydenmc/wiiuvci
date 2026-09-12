@@ -11,7 +11,7 @@ pub mod nintendont;
 
 pub use artrepo::{art_png_name, download_texture};
 pub use gametdb::lookup_title;
-pub use images::{png_to_tga, BootTexture};
+pub use images::{BootTexture, png_to_tga};
 
 /// The shared connect timeout for every HTTP fetch this crate makes: distinguishes "server
 /// unreachable" from "server slow to respond", independent of how long a given caller is willing

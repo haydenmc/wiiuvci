@@ -17,10 +17,10 @@ use std::path::Path;
 
 use crate::consts::{CLUSTER_DATA_U64, SECTORS_PER_GROUP, SECTORS_PER_GROUP_U64};
 use crate::disc_patch::{
-    apply_edits_to_group, recompute_group, DiscPlan, PartitionPlan, StoredGroups,
+    DiscPlan, PartitionPlan, StoredGroups, apply_edits_to_group, recompute_group,
 };
 use crate::error::{Error, Result};
-use crate::input::{DecryptedDisc, DISC_SECTOR_SIZE};
+use crate::input::{DISC_SECTOR_SIZE, DecryptedDisc};
 use eggs::{EggsHeader, LbaRange, MAX_RANGES};
 use split::SplitWriter;
 
@@ -67,7 +67,7 @@ fn group_runs(pp: &PartitionPlan, index: usize) -> Result<Vec<GroupRun>> {
         StoredGroups::Runs(runs) if runs.is_empty() => {
             return Err(Error::FormatLimit(format!(
                 "partition {index} stores no hash groups"
-            )))
+            )));
         }
         StoredGroups::Runs(runs) => runs
             .iter()
@@ -466,10 +466,10 @@ fn write_partition<R: Read + Seek + ?Sized>(
             // whatever the mastering tool put there, so a disagreement would say nothing about our
             // rebuild. Every whole group is checked.
             let last_sector = (g as u64 + 1) * SECTORS_PER_GROUP_U64 - 1;
-            if last_sector < total {
-                if let Some(matches) = h3_entry_matches(&pp.h3_table, g, &h3) {
-                    check.record(g, matches);
-                }
+            if last_sector < total
+                && let Some(matches) = h3_entry_matches(&pp.h3_table, g, &h3)
+            {
+                check.record(g, matches);
             }
 
             for (k, cluster) in clusters.iter_mut().enumerate() {
@@ -482,13 +482,13 @@ fn write_partition<R: Read + Seek + ?Sized>(
             }
 
             done += 1;
-            if let Some(step) = step {
-                if done.is_multiple_of(step) || done == total_groups {
-                    log::info!(
-                        "NFS: {done}/{total_groups} hash groups ({}%)",
-                        done * 100 / total_groups
-                    );
-                }
+            if let Some(step) = step
+                && (done.is_multiple_of(step) || done == total_groups)
+            {
+                log::info!(
+                    "NFS: {done}/{total_groups} hash groups ({}%)",
+                    done * 100 / total_groups
+                );
             }
         }
     }
@@ -912,7 +912,7 @@ mod tests {
     /// plan carries is compared against, never written from.
     #[test]
     fn h3_cross_check_reports_a_corrupted_table_entry() {
-        use crate::wii_author::{author_gc_disc, GcDiscInputs};
+        use crate::wii_author::{GcDiscInputs, author_gc_disc};
         use std::io::Cursor;
 
         let iso: Vec<u8> = (0..200_000u32)

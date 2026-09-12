@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(&tmd[0x18C..0x194], &0x0005000252535045u64.to_be_bytes());
         let mut c = Cursor::new(&tmd[0x1DE..0x1E0]);
         assert_eq!(c.read_u16::<BigEndian>().unwrap(), 2); // content count
-                                                           // info table hash chain
+        // info table hash chain
         let info_hash = &tmd[0x1E4..0x204];
         assert_eq!(
             info_hash,

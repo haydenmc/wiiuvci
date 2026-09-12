@@ -128,7 +128,7 @@ mod tests {
         assert_eq!(&bytes[8..12], &[0, 0, 0, 0]);
         assert_eq!(&bytes[12..16], &[0, 0, 0, 0]);
         assert_eq!(&bytes[16..20], &[0, 0, 0, 3]); // num ranges
-                                                   // range 0
+        // range 0
         assert_eq!(&bytes[20..24], &[0, 0, 0, 0]);
         assert_eq!(&bytes[24..28], &[0, 0, 0, 1]);
         // range 1

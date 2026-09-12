@@ -5,7 +5,7 @@ mod common;
 
 use std::path::Path;
 use wiivci_core::package::cert::CertChain;
-use wiivci_core::package::{build_package, PackageParams};
+use wiivci_core::package::{PackageParams, build_package};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -557,8 +557,9 @@ mod tests {
             panic!("expected a plain file with no .wua extension to be rejected");
         };
         assert!(matches!(err2, Error::InvalidTitle(_)), "got {err2}");
-        assert!(err2
-            .to_string()
-            .contains("must be a directory or a .wua archive"));
+        assert!(
+            err2.to_string()
+                .contains("must be a directory or a .wua archive")
+        );
     }
 }

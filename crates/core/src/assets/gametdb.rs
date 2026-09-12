@@ -203,14 +203,14 @@ fn fetch_wiitdb_text() -> Option<String> {
     let client = match http_client(FETCH_TIMEOUT) {
         Ok(c) => c,
         Err(e) => {
-            return warn_and_use_stale(format!("failed to build HTTP client: {e}"), stale_cached)
+            return warn_and_use_stale(format!("failed to build HTTP client: {e}"), stale_cached);
         }
     };
 
     let response = match client.get(WIITDB_URL).send() {
         Ok(resp) => resp,
         Err(e) => {
-            return warn_and_use_stale(format!("failed to reach gametdb.com: {e}"), stale_cached)
+            return warn_and_use_stale(format!("failed to reach gametdb.com: {e}"), stale_cached);
         }
     };
 
@@ -225,7 +225,7 @@ fn fetch_wiitdb_text() -> Option<String> {
             return warn_and_use_stale(
                 format!("failed to read wiitdb response body: {e}"),
                 stale_cached,
-            )
+            );
         }
     };
 

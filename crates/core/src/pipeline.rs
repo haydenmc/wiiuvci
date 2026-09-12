@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::assets::images::{png_to_tga, BootTexture};
+use crate::assets::images::{BootTexture, png_to_tga};
 use crate::assets::{artrepo, gametdb};
 use crate::base::{BaseSource, StagedBase};
 use crate::consts::{TMD_CONTENT0_HASH, WII_SIG};
@@ -21,12 +21,12 @@ use crate::fwimg;
 use crate::input::{GcImage, SourceDisc};
 use crate::keys::WiiUCommonKey;
 use crate::meta::appxml;
-use crate::meta::metaxml::{patch as patch_meta, MetaOptions};
+use crate::meta::metaxml::{MetaOptions, patch as patch_meta};
 use crate::meta::titleid;
 use crate::nfs::build_nfs;
 use crate::nincfg::{self, NincfgOptions};
 use crate::package::cert::CertChain;
-use crate::package::{build_package, PackageParams, PackageStats};
+use crate::package::{PackageParams, PackageStats, build_package};
 use crate::video::VideoPatches;
 use crate::wii_author::{self, GcDiscInputs};
 
@@ -438,13 +438,13 @@ fn base_disc_extras(
     // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
     // A failure here is not fatal — the whole work_dir is temporary — but it is worth saying,
     // since it leaves those hundreds of MB occupied for the rest of the build.
-    if let Err(e) = std::fs::remove_dir_all(&nfs_scratch) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!(
-                "could not remove the scratch copy of the base disc at {} ({e})",
-                nfs_scratch.display()
-            );
-        }
+    if let Err(e) = std::fs::remove_dir_all(&nfs_scratch)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "could not remove the scratch copy of the base disc at {} ({e})",
+            nfs_scratch.display()
+        );
     }
     extras
 }

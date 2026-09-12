@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{ArgGroup, Parser, ValueEnum};
 
 use wiivci_core::assets::nintendont;
-use wiivci_core::base::{open_base, BaseSource};
-use wiivci_core::input::{probe, DiscKind};
+use wiivci_core::base::{BaseSource, open_base};
+use wiivci_core::input::{DiscKind, probe};
 use wiivci_core::keys::WiiUCommonKey;
 use wiivci_core::nincfg::{Language, VideoMode};
 use wiivci_core::nus::{NusBase, NusClient};
@@ -649,22 +649,24 @@ mod gc_flag_tests {
         }
         assert!(parse_memcard_size("512").is_err());
         assert!(parse_memcard_size("0").is_err());
-        assert!(Cli::try_parse_from([
-            "wiivci",
-            "-i",
-            "g",
-            "-b",
-            "b",
-            "-o",
-            "o",
-            "--wiiu-common-key",
-            "00000000000000000000000000000000",
-            "--cert",
-            "c",
-            "--gc-memcard-blocks",
-            "512"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "wiivci",
+                "-i",
+                "g",
+                "-b",
+                "b",
+                "-o",
+                "o",
+                "--wiiu-common-key",
+                "00000000000000000000000000000000",
+                "--cert",
+                "c",
+                "--gc-memcard-blocks",
+                "512"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -761,7 +763,7 @@ mod gc_disc_id_tests {
 
 #[cfg(test)]
 mod ignored_flag_tests {
-    use super::{gc_only_flags_given, wii_only_flags_given, Cli};
+    use super::{Cli, gc_only_flags_given, wii_only_flags_given};
     use clap::Parser;
 
     fn parse(extra: &[&str]) -> Cli {
@@ -812,7 +814,7 @@ mod config_from_cli_tests {
     use wiivci_core::package::cert::EXPECTED_CERT_LEN;
     use wiivci_core::{Error, Result as CoreResult};
 
-    use super::{build_gc_options, config_from_cli, CertChain, Cli, WiiUCommonKey};
+    use super::{CertChain, Cli, WiiUCommonKey, build_gc_options, config_from_cli};
 
     /// A [`BaseSource`] that's never actually called — `config_from_cli` only moves the box
     /// around, so its methods just need to exist to satisfy the trait object.

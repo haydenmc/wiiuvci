@@ -116,14 +116,14 @@ fn check_length(field: &str, start: &BytesStart, text: &str) -> Result<()> {
             }
         }
         Some("hexBinary") => {
-            if let Some(expected_chars) = limit.checked_mul(2) {
-                if text.len() != expected_chars {
-                    return Err(Error::FormatLimit(format!(
-                        "meta.xml field `{field}` value is {} hex chars, but its declared \
-                         length={limit} expects exactly {expected_chars}",
-                        text.len()
-                    )));
-                }
+            if let Some(expected_chars) = limit.checked_mul(2)
+                && text.len() != expected_chars
+            {
+                return Err(Error::FormatLimit(format!(
+                    "meta.xml field `{field}` value is {} hex chars, but its declared \
+                     length={limit} expects exactly {expected_chars}",
+                    text.len()
+                )));
             }
         }
         _ => {}
@@ -218,7 +218,7 @@ pub fn patch(base_meta_xml: &str, opts: &MetaOptions) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::titleid::{derive, TitleIds};
+    use crate::meta::titleid::{TitleIds, derive};
     use std::path::Path;
 
     fn base_meta_xml() -> Option<String> {
@@ -252,15 +252,22 @@ mod tests {
         let patched = patch(&base, &opts).expect("patch succeeds");
 
         assert!(patched.starts_with('\u{FEFF}'));
-        assert!(patched
-            .contains("<title_id type=\"hexBinary\" length=\"8\">0005000252535045</title_id>"));
+        assert!(
+            patched
+                .contains("<title_id type=\"hexBinary\" length=\"8\">0005000252535045</title_id>")
+        );
         assert!(patched.contains("<group_id type=\"hexBinary\" length=\"4\">52535045</group_id>"));
-        assert!(patched
-            .contains("<product_code type=\"string\" length=\"32\">WUP-N-RSPE</product_code>"));
+        assert!(
+            patched
+                .contains("<product_code type=\"string\" length=\"32\">WUP-N-RSPE</product_code>")
+        );
         assert!(patched.contains("<region type=\"hexBinary\" length=\"4\">00000002</region>"));
         assert!(patched.contains("<drc_use type=\"unsignedInt\" length=\"4\">1</drc_use>"));
-        assert!(patched
-            .contains("<reserved_flag2 type=\"hexBinary\" length=\"4\">52535045</reserved_flag2>"));
+        assert!(
+            patched.contains(
+                "<reserved_flag2 type=\"hexBinary\" length=\"4\">52535045</reserved_flag2>"
+            )
+        );
 
         for lang in LANGS {
             assert!(patched.contains(&format!(
@@ -279,8 +286,11 @@ mod tests {
             "<olv_accesskey type=\"unsignedInt\" length=\"4\">1615642778</olv_accesskey>"
         ));
         assert!(patched.contains("<pc_esrb type=\"unsignedInt\" length=\"4\">6</pc_esrb>"));
-        assert!(patched
-            .contains("<reserved_flag0 type=\"hexBinary\" length=\"4\">00010001</reserved_flag0>"));
+        assert!(
+            patched.contains(
+                "<reserved_flag0 type=\"hexBinary\" length=\"4\">00010001</reserved_flag0>"
+            )
+        );
     }
 
     #[test]
@@ -392,8 +402,10 @@ mod tests {
         };
 
         let patched = patch(FIXTURE, &opts).expect("valid hexBinary value must be accepted");
-        assert!(patched
-            .contains("<title_id type=\"hexBinary\" length=\"8\">0005000252535045</title_id>"));
+        assert!(
+            patched
+                .contains("<title_id type=\"hexBinary\" length=\"8\">0005000252535045</title_id>")
+        );
     }
 
     #[test]
