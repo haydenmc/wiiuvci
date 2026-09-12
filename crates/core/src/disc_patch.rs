@@ -21,23 +21,16 @@ use std::io::{Read, Seek, SeekFrom};
 
 use sha1::{Digest, Sha1};
 
-use crate::consts::{HASH_BLOCK, SECTORS_PER_GROUP, TMD_CONTENT0_HASH, WII_SIG};
+use crate::consts::{
+    CLUSTER_DATA_U64, H0_REGION, H1_OFF, H1_REGION, H2_OFF, H2_REGION, HASH_BLOCK, N_SUBBLOCKS,
+    SECTORS_PER_GROUP, SECTORS_PER_SUBGROUP, SUBBLOCK, TMD_CONTENT0_HASH, WII_SIG,
+};
 use crate::error::{Error, Result};
-use crate::input::SourceDisc;
+use crate::input::{SourceDisc, DISC_SECTOR_SIZE};
 use crate::video::{find_dol_edits, VideoPatches};
 
-const SECTOR: usize = 0x8000;
-const DATA: usize = SECTOR - HASH_BLOCK; // 0x7C00
-const SUBBLOCK: usize = 0x400;
-const N_SUBBLOCKS: usize = 31;
-const SECTORS_PER_SUBGROUP: usize = 8;
-
-// Sub-regions within a cluster's 0x400 hash block.
-const H0_REGION: usize = N_SUBBLOCKS * 20; // 0x26C
-const H1_OFF: usize = 0x280;
-const H1_REGION: usize = SECTORS_PER_SUBGROUP * 20; // 0xA0
-const H2_OFF: usize = 0x340;
-const H2_REGION: usize = 8 * 20; // 0xA0
+/// `u64` form of [`DISC_SECTOR_SIZE`]: absolute disc offsets below are all `u64`.
+const SECTOR_U64: u64 = DISC_SECTOR_SIZE as u64;
 
 /// Offset of the `h3_table_off` u32 (stored `>> 2`) within the partition header.
 const H3_TABLE_OFF_FIELD: u64 = 0x2B4;
@@ -57,6 +50,21 @@ fn sha1(buf: &[u8]) -> [u8; 20] {
     Sha1::digest(buf).into()
 }
 
+/// Which 64-cluster hash groups of a partition's data region the NFS stores.
+///
+/// Spelled out as an enum rather than "an empty run list means everything": the two cases are
+/// genuinely different intentions (the synthetic GC disc is compact and stores all of it; a real
+/// disc's runs come from FST coverage), and the sentinel turned a planner that produced *no* runs
+/// — which would mean a broken plan — into a silent request to store the whole multi-GB partition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredGroups {
+    /// Store every hash group of the data region (used by the synthetic GC disc, which has no gaps).
+    All,
+    /// Store only these `(first_group, num_groups)` runs; the rest are inter-file gaps skipped in
+    /// the NFS (sparse storage, no compaction).
+    Runs(Vec<(u32, u32)>),
+}
+
 /// Per-partition plan consumed by [`crate::nfs::build_nfs`]: which sectors the partition spans,
 /// which header bytes to overlay, which `main.dol` edits to apply, and which hash groups to store.
 #[derive(Clone)]
@@ -74,10 +82,13 @@ pub struct PartitionPlan {
     /// `main.dol` edits, as (logical partition-data offset, replacement bytes). Data partition
     /// only; empty otherwise.
     pub edits: Vec<(u64, Vec<u8>)>,
-    /// Runs of 64-cluster hash groups (0-based within the data region) that hold real data and
-    /// must be stored; the rest are inter-file gaps skipped in the NFS (sparse storage, no
-    /// compaction). Empty means "store every group" (used by the synthetic GC disc).
-    pub stored_data_groups: Vec<(u32, u32)>,
+    /// The partition's H3 table as the NFS will contain it — the same bytes `header_patches`
+    /// writes over the on-disc table. Exposed so [`crate::nfs::build_nfs`] can compare the H3 it
+    /// recomputes for each stored group against what the table claims, catching a plan whose
+    /// table and data have drifted apart (the console does not verify this, so nothing else would).
+    pub h3_table: Vec<u8>,
+    /// Which hash groups of the data region the NFS stores.
+    pub stored_data_groups: StoredGroups,
 }
 
 /// A whole-disc rebuild plan: how to rebuild each partition's Wii hash tree (and apply any
@@ -91,20 +102,18 @@ pub struct DiscPlan {
     /// Byte-range overlays applied to the disc-level (non-partition) sectors — used to rewrite the
     /// partition table so it lists only the data partition. Keyed by absolute disc byte offset.
     pub disc_patches: Vec<(u64, Vec<u8>)>,
-    /// Content hash for the emitted `rvlt.tmd`: SHA-1 of the data partition's H3 table. Always
-    /// set by [`plan_disc`] and [`crate::wii_author::author_gc_disc`]; when no `main.dol` edit was
-    /// applied it simply equals the hash of the source disc's own H3 table.
-    pub rvlt_content_hash: Option<[u8; 20]>,
-    /// Names of the video patches that matched and were applied.
-    pub applied: Vec<&'static str>,
+    /// Content hash for the emitted `rvlt.tmd`: SHA-1 of the data partition's H3 table. Both
+    /// producers ([`plan_disc`] and [`crate::wii_author::author_gc_disc`]) always compute it; when
+    /// no `main.dol` edit was applied it simply equals the hash of the source disc's own H3 table.
+    pub rvlt_content_hash: [u8; 20],
 }
 
 /// Recompute the H0/H1/H2 hash blocks of a full 64-cluster group in place and return its H3.
 ///
-/// `clusters` must be exactly [`SECTORS_PER_GROUP`] clusters of [`SECTOR`] bytes; clusters that
+/// `clusters` must be exactly [`SECTORS_PER_GROUP`] clusters of [`DISC_SECTOR_SIZE`] bytes; clusters that
 /// fall past the partition end should be passed zero-filled (matching `nod`'s zero-sector
 /// padding). A differently sized slice is a caller bug and returns an error.
-pub fn recompute_group(clusters: &mut [[u8; SECTOR]]) -> Result<[u8; 20]> {
+pub fn recompute_group(clusters: &mut [[u8; DISC_SECTOR_SIZE]]) -> Result<[u8; 20]> {
     if clusters.len() != SECTORS_PER_GROUP {
         return Err(Error::Other(anyhow::anyhow!(
             "hash group must be exactly {SECTORS_PER_GROUP} clusters, got {}",
@@ -167,12 +176,13 @@ pub(crate) fn h3_entry_mut(h3_table: &mut [u8], g: usize) -> Result<&mut [u8]> {
 
 fn read_at<R: Read + Seek>(disc: &mut R, offset: u64, out: &mut [u8]) -> Result<()> {
     disc.seek(SeekFrom::Start(offset))
-        .map_err(|e| Error::io("<disc>", e))?;
-    disc.read_exact(out).map_err(|e| Error::io("<disc>", e))?;
+        .map_err(|e| Error::read("the decrypted disc", e))?;
+    disc.read_exact(out)
+        .map_err(|e| Error::read("the decrypted disc", e))?;
     Ok(())
 }
 
-// Offsets within the partition header (at `start_sector * SECTOR`).
+// Offsets within the partition header (at `start_sector * DISC_SECTOR_SIZE`).
 const TMD_OFF_FIELD: u64 = 0x2A8; // u32, stored >> 2
 
 // The partition's own ticket sits at the partition start (offset 0); its signature shares the
@@ -237,7 +247,7 @@ pub fn plan_disc(
         }
     }
 
-    let part_base = span.start_sector as u64 * SECTOR as u64;
+    let part_base = span.start_sector as u64 * SECTOR_U64;
     let mut off_field = [0u8; 4];
     read_at(
         source.stream(),
@@ -255,20 +265,25 @@ pub fn plan_disc(
         let total = (span.data_end_sector - span.data_start_sector) as u64;
         let mut groups: BTreeSet<u32> = BTreeSet::new();
         for (off, bytes) in &edits {
-            let first = off / DATA as u64;
-            let last = (off + bytes.len() as u64 - 1) / DATA as u64;
+            // An empty edit covers no bytes, and `len - 1` would wrap into a bogus final sector
+            // (the same guard `crate::nfs::verify_patches_contained` applies to this expression).
+            if bytes.is_empty() {
+                continue;
+            }
+            let first = off / CLUSTER_DATA_U64;
+            let last = (off + bytes.len() as u64 - 1) / CLUSTER_DATA_U64;
             for ps in first..=last {
                 groups.insert((ps / SECTORS_PER_GROUP as u64) as u32);
             }
         }
         for &g in &groups {
-            let mut clusters = vec![[0u8; SECTOR]; SECTORS_PER_GROUP];
+            let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
             for (k, cluster) in clusters.iter_mut().enumerate() {
                 let ps = g as u64 * SECTORS_PER_GROUP as u64 + k as u64;
                 if ps < total {
                     read_at(
                         source.stream(),
-                        (span.data_start_sector as u64 + ps) * SECTOR as u64,
+                        (span.data_start_sector as u64 + ps) * SECTOR_U64,
                         cluster,
                     )?;
                 }
@@ -282,7 +297,6 @@ pub fn plan_disc(
     // The partition's content hash is SHA1 of the (possibly rebuilt) H3 table. This is unchanged
     // from the source when there were no edits.
     let content_hash = sha1(&h3_table);
-    let rvlt_content_hash = Some(content_hash);
 
     // Fakesign the partition's OWN in-disc ticket and TMD (zero the RSA signatures) and set the
     // TMD's content hash. The Wii U's patched fw.img accepts a zeroed signature and *rejects* a
@@ -299,13 +313,15 @@ pub fn plan_disc(
     header_patches.push((tmd_base + TMD_SIG.start as u64, vec![0u8; TMD_SIG.len()]));
     header_patches.push((tmd_base + TMD_CONTENT0_HASH as u64, content_hash.to_vec()));
 
-    // Always (re)write the valid H3 table so we don't depend on the stream's copy.
-    header_patches.push((h3_base, h3_table));
+    // Always (re)write the valid H3 table so we don't depend on the stream's copy. The plan keeps
+    // its own copy of the same bytes for `build_nfs`'s H3 cross-check.
+    header_patches.push((h3_base, h3_table.clone()));
 
     // Sparse storage: only the hash groups the FST (and boot structures) actually use are written
     // to the NFS; the multi-GB inter-file gaps are skipped without relocating any file. `skip_gaps`
     // / `trim_zeros` control gap-skipping and wholly-zero-file trimming (see `used_data_group_runs`).
-    let stored_data_groups = source.used_data_group_runs(skip_gaps, trim_zeros)?;
+    let stored_data_groups =
+        StoredGroups::Runs(source.used_data_group_runs(skip_gaps, trim_zeros)?);
 
     let partitions = vec![PartitionPlan {
         start_sector: span.start_sector,
@@ -313,6 +329,7 @@ pub fn plan_disc(
         data_end_sector: span.data_end_sector,
         header_patches,
         edits,
+        h3_table,
         stored_data_groups,
     }];
     let disc_patches = partition_table_patches(part_base);
@@ -323,26 +340,25 @@ pub fn plan_disc(
     Ok(DiscPlan {
         partitions,
         disc_patches,
-        rvlt_content_hash,
-        applied,
+        rvlt_content_hash: content_hash,
     })
 }
 
 /// Apply the edits that fall within group `g` to its 64 cluster buffers.
 pub(crate) fn apply_edits_to_group(
-    clusters: &mut [[u8; SECTOR]],
+    clusters: &mut [[u8; DISC_SECTOR_SIZE]],
     g: u32,
     edits: &[(u64, Vec<u8>)],
 ) {
     for (off, bytes) in edits {
         for (bi, &b) in bytes.iter().enumerate() {
             let l = off + bi as u64;
-            let ps = l / DATA as u64;
+            let ps = l / CLUSTER_DATA_U64;
             if (ps / SECTORS_PER_GROUP as u64) as u32 != g {
                 continue;
             }
             let k = (ps % SECTORS_PER_GROUP as u64) as usize;
-            let within = (l % DATA as u64) as usize;
+            let within = (l % CLUSTER_DATA_U64) as usize;
             clusters[k][HASH_BLOCK + within] = b;
         }
     }
@@ -354,7 +370,7 @@ mod tests {
 
     /// Independent re-implementation of `nod`'s per-sector hash verification, used to prove our
     /// recompute produces a self-consistent tree.
-    fn verify_group(clusters: &[[u8; SECTOR]], h3_table_entry: &[u8; 20]) {
+    fn verify_group(clusters: &[[u8; DISC_SECTOR_SIZE]], h3_table_entry: &[u8; 20]) {
         for (part_sector, cluster) in clusters.iter().enumerate() {
             let sector = part_sector % SECTORS_PER_SUBGROUP;
             let sub_group = (part_sector / SECTORS_PER_SUBGROUP) % SECTORS_PER_SUBGROUP;
@@ -379,8 +395,8 @@ mod tests {
         assert_eq!(&h3, h3_table_entry, "H3 mismatch");
     }
 
-    fn sample_group() -> Vec<[u8; SECTOR]> {
-        let mut clusters = vec![[0u8; SECTOR]; SECTORS_PER_GROUP];
+    fn sample_group() -> Vec<[u8; DISC_SECTOR_SIZE]> {
+        let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
         // Deterministic pseudo-data in the data region of each cluster.
         for (c, cluster) in clusters.iter_mut().enumerate() {
             for (idx, byte) in cluster[HASH_BLOCK..].iter_mut().enumerate() {
@@ -421,7 +437,7 @@ mod tests {
 
     #[test]
     fn wrong_sized_group_is_an_error_not_a_panic() {
-        let mut short = vec![[0u8; SECTOR]; SECTORS_PER_GROUP - 1];
+        let mut short = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP - 1];
         assert!(recompute_group(&mut short).is_err());
     }
 
@@ -444,6 +460,90 @@ mod tests {
         let h3b = recompute_group(&mut b).unwrap();
         assert_ne!(h3a, h3b, "changing data must change the group's H3");
         verify_group(&b, &h3b);
+    }
+
+    /// Byte-pin the three partition-table patches: group table (0x40000, 0x20 bytes, group 0 has
+    /// one partition whose info table is at `0x40020 >> 2`, groups 1..3 zero), info table
+    /// (0x40020, 0x20 bytes, entry 0 = `{partition_offset >> 2, type 0}`, the remaining three
+    /// entries zero), and the region age-ratings zeroing (0x4E010, 0x10 bytes).
+    #[test]
+    fn partition_table_patches_byte_pin() {
+        let data_part_off = 0xF80_0000u64;
+        let patches = partition_table_patches(data_part_off);
+        assert_eq!(patches.len(), 3);
+
+        let (off0, groups) = &patches[0];
+        assert_eq!(*off0, 0x40000);
+        assert_eq!(groups.len(), 0x20);
+        assert_eq!(
+            &groups[0..4],
+            &1u32.to_be_bytes(),
+            "group 0 has one partition"
+        );
+        assert_eq!(
+            &groups[4..8],
+            &((0x40020u32) >> 2).to_be_bytes(),
+            "group 0's info table pointer"
+        );
+        assert!(
+            groups[8..].iter().all(|&b| b == 0),
+            "groups 1..3 must be empty"
+        );
+
+        let (off1, info) = &patches[1];
+        assert_eq!(*off1, 0x40020);
+        assert_eq!(info.len(), 0x20);
+        assert_eq!(
+            &info[0..4],
+            &((data_part_off >> 2) as u32).to_be_bytes(),
+            "partition offset >> 2"
+        );
+        assert_eq!(&info[4..8], &0u32.to_be_bytes(), "type 0 = DATA");
+        assert!(
+            info[8..].iter().all(|&b| b == 0),
+            "the remaining three info entries must be zero"
+        );
+
+        let (off2, ratings) = &patches[2];
+        assert_eq!(*off2, 0x4E010);
+        assert_eq!(ratings.len(), 0x10);
+        assert!(ratings.iter().all(|&b| b == 0));
+    }
+
+    /// An edit that straddles two clusters' 0x7C00 data windows lands at `HASH_BLOCK + within` in
+    /// each cluster it touches; an edit addressed to a different group leaves this group's
+    /// clusters completely untouched.
+    #[test]
+    fn apply_edits_to_group_straddles_cluster_boundary_and_ignores_other_groups() {
+        let g = 3u32;
+        let group_base = g as u64 * SECTORS_PER_GROUP as u64 * CLUSTER_DATA_U64;
+
+        // 4 bytes straddling the boundary between cluster 0 and cluster 1 of group g: the last
+        // two bytes of cluster 0's data window, then the first two of cluster 1's.
+        let edit_off = group_base + CLUSTER_DATA_U64 - 2;
+        let bytes = vec![0xAAu8, 0xBB, 0xCC, 0xDD];
+        let edits = vec![(edit_off, bytes)];
+
+        let mut clusters = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
+        apply_edits_to_group(&mut clusters, g, &edits);
+
+        let last = HASH_BLOCK + (CLUSTER_DATA_U64 as usize - 2);
+        assert_eq!(clusters[0][last], 0xAA);
+        assert_eq!(clusters[0][last + 1], 0xBB);
+        assert_eq!(clusters[1][HASH_BLOCK], 0xCC);
+        assert_eq!(clusters[1][HASH_BLOCK + 1], 0xDD);
+
+        // An edit addressed to a different group must not touch group g's clusters at all.
+        let mut untouched = vec![[0u8; DISC_SECTOR_SIZE]; SECTORS_PER_GROUP];
+        let other_group_off = (g as u64 + 1) * SECTORS_PER_GROUP as u64 * CLUSTER_DATA_U64;
+        let other_edits = vec![(other_group_off, vec![0xFFu8; 4])];
+        apply_edits_to_group(&mut untouched, g, &other_edits);
+        for cluster in &untouched {
+            assert!(
+                cluster.iter().all(|&b| b == 0),
+                "group g must be untouched by another group's edit"
+            );
+        }
     }
 
     /// Full end-to-end: patch Wii Sports' main.dol (all three patches), build the NFS, reopen it
@@ -483,13 +583,15 @@ mod tests {
 
         let mut source = SourceDisc::open(&title).unwrap();
         let plan = plan_disc(&mut source, &patches, true, false).unwrap();
-        let content_hash = plan
-            .rvlt_content_hash
-            .expect("data partition should be patched");
+        let content_hash = plan.rvlt_content_hash;
 
         let htk = [0x5Au8; 16];
         let out = tempfile::tempdir().unwrap();
-        build_nfs(&mut source, &htk, out.path(), &plan).unwrap();
+        let stats = build_nfs(&mut source, &htk, out.path(), &plan).unwrap();
+        assert_eq!(
+            stats.h3_mismatches, 0,
+            "the patched groups' rebuilt H3 must match the rebuilt H3 table"
+        );
         std::fs::write(out.path().join("htk.bin"), htk).unwrap();
 
         let nfs = nod::Disc::new_with_options(

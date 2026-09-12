@@ -18,6 +18,8 @@
 //! (`> NIN_CFG_MAXPAD`), rejects the forwarder-passed config, and drops to its menu instead of
 //! autobooting — which is exactly what a GameCube inject built before this fix did on hardware.
 
+use crate::error::{Error, Result};
+
 /// Total size of a version-10 `NIN_CFG` record (`sizeof(NIN_CFG)`, natural alignment).
 pub const NINCFG_SIZE: usize = 0x224;
 
@@ -42,6 +44,15 @@ const OFF_VIDEOSCALE: usize = 0x21D;
 const OFF_VIDEOOFFSET: usize = 0x21E;
 const OFF_NETWORKPROFILE: usize = 0x21F;
 const OFF_WIIU_GAMEPAD_SLOT: usize = 0x220;
+
+// The four single-byte fields after MemCardBlocks are contiguous and lead straight into
+// WiiUGamepadSlot; pin that so an offset edit cannot silently shift the tail of the record.
+const _: () = assert!(
+    OFF_MEMCARDBLOCKS + 1 == OFF_VIDEOSCALE
+        && OFF_VIDEOSCALE + 1 == OFF_VIDEOOFFSET
+        && OFF_VIDEOOFFSET + 1 == OFF_NETWORKPROFILE
+        && OFF_NETWORKPROFILE + 1 == OFF_WIIU_GAMEPAD_SLOT
+);
 
 const PATH_LEN: usize = 255;
 
@@ -111,7 +122,8 @@ pub enum VideoMode {
     ForcePal60,
     /// Force MPAL.
     ForceMpal,
-    /// Force progressive (480p); combined with the region's mode.
+    /// Force progressive scan: NTSC 480p (`VID_FORCE | VID_NTSC | VID_PROG`), not the source
+    /// region's own mode.
     ForceProgressive,
     /// Disable Nintendont's video handling entirely.
     None,
@@ -174,8 +186,60 @@ impl Default for NincfgOptions {
 /// The disc path Nintendont reads the game from on a Wii U VC inject (the emulated disc).
 const GAME_PATH: &str = "di:/game.iso";
 
+/// Maximum controllers Nintendont accepts (`NIN_CFG_MAXPAD`).
+const MAX_PADS_LIMIT: u32 = 4;
+/// Maximum emulated memory-card size selector Nintendont accepts (`MEM_CARD_MAX`): 0..=4 select
+/// 59/123/251/507/1019 blocks.
+const MEMCARD_BLOCKS_LIMIT: u8 = 4;
+/// Highest controller slot a Wii U GamePad can be mapped to (slots are 0..=3).
+const WIIU_GAMEPAD_SLOT_LIMIT: u32 = 3;
+
 /// Serialize `opts` into a 548-byte `nincfg.bin` record.
-pub fn generate(opts: &NincfgOptions) -> [u8; NINCFG_SIZE] {
+///
+/// Every field that Nintendont range-checks is validated here rather than written blindly: the
+/// loader does not clamp an out-of-range value, it **rejects the whole config** and drops to its
+/// own menu instead of autobooting (see the module docs — an out-of-range `MaxPads` is exactly
+/// how a GameCube inject silently failed to boot on hardware). A silent truncation of
+/// `cheat_path` is the same class of failure one level down: Nintendont would look for a
+/// different file than the user asked for, so an over-long or non-ASCII path is an error too.
+pub fn generate(opts: &NincfgOptions) -> Result<[u8; NINCFG_SIZE]> {
+    if opts.max_pads > MAX_PADS_LIMIT {
+        return Err(Error::FormatLimit(format!(
+            "nincfg MaxPads is {} but Nintendont accepts at most {MAX_PADS_LIMIT}; a larger \
+             value makes it reject the whole config and refuse to autoboot",
+            opts.max_pads
+        )));
+    }
+    if opts.memcard_blocks > MEMCARD_BLOCKS_LIMIT {
+        return Err(Error::FormatLimit(format!(
+            "nincfg MemCardBlocks is {} but Nintendont accepts at most {MEMCARD_BLOCKS_LIMIT} \
+             (0..=4 select 59/123/251/507/1019 blocks)",
+            opts.memcard_blocks
+        )));
+    }
+    if opts.wiiu_gamepad_slot > WIIU_GAMEPAD_SLOT_LIMIT {
+        return Err(Error::FormatLimit(format!(
+            "nincfg WiiUGamepadSlot is {} but controller slots are 0..={WIIU_GAMEPAD_SLOT_LIMIT}",
+            opts.wiiu_gamepad_slot
+        )));
+    }
+    if let Some(path) = &opts.cheat_path {
+        if !path.is_ascii() {
+            return Err(Error::FormatLimit(format!(
+                "nincfg CheatPath '{path}' is not ASCII; the field is a fixed char[{PATH_LEN}] \
+                 Nintendont reads as plain bytes"
+            )));
+        }
+        if path.len() > PATH_LEN - 1 {
+            return Err(Error::FormatLimit(format!(
+                "nincfg CheatPath is {} bytes but the field holds at most {} plus a NUL \
+                 terminator; truncating it would point Nintendont at a different file",
+                path.len(),
+                PATH_LEN - 1
+            )));
+        }
+    }
+
     let mut buf = [0u8; NINCFG_SIZE];
 
     let mut config = CFG_AUTO_BOOT;
@@ -202,20 +266,24 @@ pub fn generate(opts: &NincfgOptions) -> [u8; NINCFG_SIZE] {
     // GameID is 4 ASCII bytes stored in reading order (equivalent to a big-endian u32).
     buf[OFF_GAMEID..OFF_GAMEID + 4].copy_from_slice(&opts.game_id);
     buf[OFF_MEMCARDBLOCKS] = opts.memcard_blocks;
-    buf[OFF_VIDEOSCALE] = 0; // s8, centered
-    buf[OFF_VIDEOOFFSET] = 0; // s8, centered
-    buf[OFF_NETWORKPROFILE] = 0;
+    // VideoScale and VideoOffset are s8 signed bytes; zero centers the screen on both axes.
+    // NetworkProfile = 0 (default); these three fields are documented by their OFF_* constants
+    // and intentionally left at their zero defaults.
     put_u32(&mut buf, OFF_WIIU_GAMEPAD_SLOT, opts.wiiu_gamepad_slot);
 
-    buf
+    Ok(buf)
 }
 
 fn put_u32(buf: &mut [u8], off: usize, val: u32) {
     buf[off..off + 4].copy_from_slice(&val.to_be_bytes());
 }
 
-/// Write a NUL-terminated ASCII string into a fixed `len`-byte field, truncating to leave room
-/// for the terminator. The field is already zeroed, so a short string is NUL-padded.
+/// Write a NUL-terminated ASCII string into a fixed `len`-byte field. The field is already zeroed,
+/// so a short string is NUL-padded.
+///
+/// The `min` is a backstop only: [`generate`] rejects any caller-supplied path that would not fit
+/// (truncating one would silently change which file Nintendont loads), and the one hard-coded
+/// string — [`GAME_PATH`] — is far shorter than the field.
 fn put_cstr(buf: &mut [u8], off: usize, len: usize, s: &str) {
     let max = len - 1;
     let bytes = s.as_bytes();
@@ -235,7 +303,7 @@ mod tests {
     fn record_is_exactly_548_bytes() {
         // sizeof(NIN_CFG) with natural alignment; Nintendont's loader rejects any other length.
         assert_eq!(NINCFG_SIZE, 548);
-        let cfg = generate(&NincfgOptions::default());
+        let cfg = generate(&NincfgOptions::default()).unwrap();
         assert_eq!(cfg.len(), 548);
     }
 
@@ -250,7 +318,8 @@ mod tests {
             memcard_blocks: 2,
             wiiu_gamepad_slot: 1,
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert_eq!(
             &cfg[0x212..0x214],
             &[0, 0],
@@ -272,7 +341,8 @@ mod tests {
         let cfg = generate(&NincfgOptions {
             game_id: *b"GALE",
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert_eq!(read_u32(&cfg, OFF_MAGIC), 0x0107_0CF6);
         assert_eq!(read_u32(&cfg, OFF_VERSION), 10);
         // Big-endian byte order on disc.
@@ -292,7 +362,7 @@ mod tests {
 
     #[test]
     fn default_config_autoboots_with_memcard_emulation() {
-        let cfg = generate(&NincfgOptions::default());
+        let cfg = generate(&NincfgOptions::default()).unwrap();
         let config = read_u32(&cfg, OFF_CONFIG);
         assert_eq!(config & CFG_AUTO_BOOT, CFG_AUTO_BOOT, "should autoboot");
         assert_eq!(
@@ -309,7 +379,8 @@ mod tests {
         let cfg = generate(&NincfgOptions {
             widescreen: true,
             ..Default::default()
-        });
+        })
+        .unwrap();
         let config = read_u32(&cfg, OFF_CONFIG);
         assert_eq!(config & CFG_FORCE_WIDE, CFG_FORCE_WIDE);
         assert_eq!(config & CFG_WIIU_WIDE, CFG_WIIU_WIDE);
@@ -320,7 +391,8 @@ mod tests {
         let cfg = generate(&NincfgOptions {
             cheat_path: Some("sd:/codes/GALE01.gct".into()),
             ..Default::default()
-        });
+        })
+        .unwrap();
         let config = read_u32(&cfg, OFF_CONFIG);
         assert_eq!(config & CFG_CHEATS, CFG_CHEATS);
         assert_eq!(config & CFG_CHEAT_PATH, CFG_CHEAT_PATH);
@@ -339,28 +411,119 @@ mod tests {
         let cfg = generate(&NincfgOptions {
             language: Language::Auto,
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert_eq!(read_u32(&cfg, OFF_LANGUAGE), 0xFFFF_FFFF);
 
         let cfg = generate(&NincfgOptions {
             language: Language::French,
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert_eq!(read_u32(&cfg, OFF_LANGUAGE), 2);
     }
 
     #[test]
     fn video_mode_auto_is_zero_and_progressive_sets_prog_bit() {
-        let cfg = generate(&NincfgOptions::default());
+        let cfg = generate(&NincfgOptions::default()).unwrap();
         assert_eq!(read_u32(&cfg, OFF_VIDEOMODE), 0);
 
         let cfg = generate(&NincfgOptions {
             video_mode: VideoMode::ForceProgressive,
             ..Default::default()
-        });
+        })
+        .unwrap();
         let v = read_u32(&cfg, OFF_VIDEOMODE);
         assert_eq!(v & VID_FORCE, VID_FORCE);
         assert_eq!(v & VID_PROG, VID_PROG);
+    }
+
+    /// Nintendont validates these fields itself and rejects the *entire* config when one is out
+    /// of range (dropping to its menu instead of autobooting), so generating such a record is a
+    /// silent boot failure. Each must be an error here instead.
+    #[test]
+    fn out_of_range_scalars_are_rejected() {
+        for (label, opts) in [
+            (
+                "MaxPads",
+                NincfgOptions {
+                    max_pads: 5,
+                    ..Default::default()
+                },
+            ),
+            (
+                "MemCardBlocks",
+                NincfgOptions {
+                    memcard_blocks: 5,
+                    ..Default::default()
+                },
+            ),
+            (
+                "WiiUGamepadSlot",
+                NincfgOptions {
+                    wiiu_gamepad_slot: 4,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let err = generate(&opts).unwrap_err();
+            assert!(
+                matches!(err, Error::FormatLimit(_)),
+                "{label} should be a format-limit error, got {err}"
+            );
+            assert!(
+                err.to_string().contains(label),
+                "{label} error should name the field: {err}"
+            );
+        }
+        // The documented maxima themselves must still be accepted.
+        assert!(generate(&NincfgOptions {
+            max_pads: 4,
+            memcard_blocks: 4,
+            wiiu_gamepad_slot: 3,
+            ..Default::default()
+        })
+        .is_ok());
+    }
+
+    /// A cheat path that does not fit the fixed `char[255]` field would be truncated into a
+    /// *different*, probably nonexistent, path — reject it instead.
+    #[test]
+    fn cheat_path_longer_than_the_field_is_rejected() {
+        let ok = "s".repeat(PATH_LEN - 1); // 254 bytes + the NUL terminator
+        let cfg = generate(&NincfgOptions {
+            cheat_path: Some(ok.clone()),
+            ..Default::default()
+        })
+        .expect("a 254-byte cheat path fits the field");
+        assert_eq!(&cfg[OFF_CHEATPATH..OFF_CHEATPATH + ok.len()], ok.as_bytes());
+        assert_eq!(cfg[OFF_CHEATPATH + ok.len()], 0, "NUL terminator");
+
+        let err = generate(&NincfgOptions {
+            cheat_path: Some("s".repeat(PATH_LEN)), // 255 bytes: no room for the terminator
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::FormatLimit(_)),
+            "expected a format-limit error, got {err}"
+        );
+    }
+
+    /// The field is raw bytes to Nintendont, and a byte-index truncation could even split a UTF-8
+    /// sequence — so a non-ASCII path is rejected rather than silently mangled.
+    #[test]
+    fn non_ascii_cheat_path_is_rejected() {
+        let err = generate(&NincfgOptions {
+            cheat_path: Some("sd:/codes/Pokémon.gct".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::FormatLimit(_)),
+            "expected a format-limit error, got {err}"
+        );
+        assert!(err.to_string().contains("ASCII"), "{err}");
     }
 
     #[test]
@@ -370,7 +533,8 @@ mod tests {
             max_pads: 4,
             wiiu_gamepad_slot: 1,
             ..Default::default()
-        });
+        })
+        .unwrap();
         assert_eq!(read_u32(&cfg, OFF_MAXPADS), 4);
         assert_eq!(cfg[OFF_MEMCARDBLOCKS], 3);
         assert_eq!(read_u32(&cfg, OFF_WIIU_GAMEPAD_SLOT), 1);

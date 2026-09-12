@@ -18,6 +18,16 @@ pub struct TitleIds {
 pub fn derive(disc_id4: [u8; 4]) -> TitleIds {
     let disc4hex = u32::from_be_bytes(disc_id4);
     let title_id = 0x0005_0002_0000_0000u64 | disc4hex as u64;
+
+    // Check if disc_id4 contains non-ASCII characters; if so, warn that the product code
+    // will contain Unicode replacement characters.
+    if !disc_id4.iter().all(|&b| b.is_ascii_alphanumeric()) {
+        log::warn!(
+            "disc ID {:?} contains non-ASCII bytes; product code will contain replacement characters",
+            disc_id4
+        );
+    }
+
     let product_code = format!("WUP-N-{}", String::from_utf8_lossy(&disc_id4));
 
     TitleIds {
@@ -39,5 +49,12 @@ mod tests {
         assert_eq!(ids.group_id, 0x52535045);
         assert_eq!(ids.reserved_flag2, 0x52535045);
         assert_eq!(ids.product_code, "WUP-N-RSPE");
+    }
+
+    #[test]
+    fn product_code_matches_for_valid_id() {
+        // Confirm that a valid ASCII-alphanumeric ID yields the expected product code.
+        let ids = derive(*b"TEST");
+        assert_eq!(ids.product_code, "WUP-N-TEST");
     }
 }

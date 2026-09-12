@@ -22,8 +22,7 @@
 //!       then the name table: NUL-terminated names in entry order.
 //! ```
 
-use byteorder::{BigEndian, WriteBytesExt};
-use std::io::Write;
+use byteorder::BigEndian;
 
 /// Offset factor used for file offsets within contents (matches retail titles).
 pub const OFFSET_FACTOR: u32 = 0x20;
@@ -47,9 +46,19 @@ pub struct FstContent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FstNodeKind {
     /// A file: raw byte offset within its content, and byte size.
-    File { offset: u64, size: u64 },
+    File {
+        /// Raw byte offset within the file's content.
+        offset: u64,
+        /// Byte size.
+        size: u64,
+    },
     /// A directory: parent entry index, and the index one past its last descendant.
-    Dir { parent_index: u32, end_index: u32 },
+    Dir {
+        /// Index of the parent directory entry.
+        parent_index: u32,
+        /// Index one past the last descendant of this directory.
+        end_index: u32,
+    },
 }
 
 /// A file/directory entry.
@@ -68,6 +77,21 @@ pub struct FstNode {
     pub cluster: u16,
 }
 
+/// The exact byte length [`Fst::serialize`] produces for an FST with `content_count` contents and
+/// `nodes` entries, without building it.
+///
+/// The serialized size depends only on the *shape* of the FST — never on any field's value — so
+/// this can be computed before the content table is filled in: a fixed 0x20-byte header, 0x20 per
+/// content descriptor, 0x10 per entry, and one NUL-terminated name per entry.
+///
+/// This exists because content 0 (the FST) needs its own size in the content table it contains,
+/// which is a circular dependency the packer can only break by computing the length up front.
+pub fn serialized_len(content_count: usize, nodes: &[FstNode]) -> usize {
+    0x20 + 0x20 * content_count
+        + 0x10 * nodes.len()
+        + nodes.iter().map(|n| n.name.len() + 1).sum::<usize>()
+}
+
 /// A complete FST ready to serialize.
 #[derive(Clone, Debug)]
 pub struct Fst {
@@ -80,22 +104,26 @@ pub struct Fst {
 }
 
 impl Fst {
+    /// The byte length [`Fst::serialize`] would produce for this FST — see [`serialized_len`].
+    pub fn serialized_len(&self) -> usize {
+        serialized_len(self.contents.len(), &self.nodes)
+    }
+
     /// Serialize the FST to its on-disk byte form.
     pub fn serialize(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"FST\0");
-        out.write_u32::<BigEndian>(self.offset_factor).unwrap();
-        out.write_u32::<BigEndian>(self.contents.len() as u32)
-            .unwrap();
+        out.extend_from_slice(&self.offset_factor.to_be_bytes());
+        out.extend_from_slice(&(self.contents.len() as u32).to_be_bytes());
         // 0x0C..0x20 is zero in retail FSTs (the wiki's "0x0100" here does not match).
         out.extend_from_slice(&[0u8; 20]);
 
         for c in &self.contents {
-            out.write_u32::<BigEndian>(c.offset_sectors).unwrap();
-            out.write_u32::<BigEndian>(c.size_sectors).unwrap();
-            out.write_u64::<BigEndian>(c.owner_title_id).unwrap();
-            out.write_u32::<BigEndian>(c.group_id).unwrap();
-            out.write_u16::<BigEndian>(c.flags).unwrap();
+            out.extend_from_slice(&c.offset_sectors.to_be_bytes());
+            out.extend_from_slice(&c.size_sectors.to_be_bytes());
+            out.extend_from_slice(&c.owner_title_id.to_be_bytes());
+            out.extend_from_slice(&c.group_id.to_be_bytes());
+            out.extend_from_slice(&c.flags.to_be_bytes());
             out.extend_from_slice(&[0u8; 10]);
         }
 
@@ -120,17 +148,16 @@ impl Fst {
                     end_index,
                 } => (0x01u8, parent_index, end_index),
             };
-            out.write_u8(dir_bit | node.type_flags).unwrap();
-            out.write_u8((name_off >> 16) as u8).unwrap();
-            out.write_u16::<BigEndian>((name_off & 0xFFFF) as u16)
-                .unwrap();
-            out.write_u32::<BigEndian>(offset).unwrap();
-            out.write_u32::<BigEndian>(size).unwrap();
-            out.write_u16::<BigEndian>(node.flags).unwrap();
-            out.write_u16::<BigEndian>(node.cluster).unwrap();
+            out.push(dir_bit | node.type_flags);
+            out.push((name_off >> 16) as u8);
+            out.extend_from_slice(&((name_off & 0xFFFF) as u16).to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(&node.flags.to_be_bytes());
+            out.extend_from_slice(&node.cluster.to_be_bytes());
         }
 
-        out.write_all(&names).unwrap();
+        out.extend_from_slice(&names);
         out
     }
 
@@ -146,6 +173,13 @@ impl Fst {
             return None;
         }
         let offset_factor = BigEndian::read_u32(&data[4..8]);
+        // A zero offset_factor has no valid interpretation (every file offset would be
+        // `raw * 0 == 0`, silently collapsing every file onto its content's start) and would
+        // panic `serialize` on the reciprocal division — reject it here rather than producing
+        // an `Fst` that can't be round-tripped.
+        if offset_factor == 0 {
+            return None;
+        }
         let content_count = BigEndian::read_u32(&data[8..12]) as usize;
 
         // Bound the content table against `data`'s real length before trusting `content_count`
@@ -244,9 +278,9 @@ mod tests {
             .join("../../.dev/wup_ref/fst_decrypted.bin")
     }
 
-    #[test]
-    fn round_trips_a_small_fst() {
-        let fst = Fst {
+    /// A small but complete FST: two contents, a root, a directory and a file.
+    fn small_fst() -> Fst {
+        Fst {
             offset_factor: OFFSET_FACTOR,
             contents: vec![
                 FstContent {
@@ -296,16 +330,42 @@ mod tests {
                     cluster: 1,
                 },
             ],
-        };
+        }
+    }
+
+    #[test]
+    fn round_trips_a_small_fst() {
+        let fst = small_fst();
         let bytes = fst.serialize();
         let parsed = Fst::parse(&bytes).unwrap();
         assert_eq!(parsed.serialize(), bytes);
         assert_eq!(parsed.nodes[2].name, "meta.xml");
     }
 
+    /// `serialized_len` must predict `serialize`'s output length exactly — the packer sizes
+    /// content 0 from it *before* the bytes exist, so any drift silently mis-sizes the FST
+    /// content.
+    #[test]
+    fn serialized_len_matches_serialize() {
+        let fst = small_fst();
+        assert_eq!(fst.serialized_len(), fst.serialize().len());
+        assert_eq!(
+            serialized_len(fst.contents.len(), &fst.nodes),
+            fst.serialize().len()
+        );
+
+        // Changing a *value* (not the shape) must not change the predicted length.
+        let mut fst2 = small_fst();
+        fst2.contents[0].size_sectors = 0xFFFF_FFFF;
+        fst2.contents[1].offset_sectors = 0x1234_5678;
+        assert_eq!(fst2.serialized_len(), fst.serialized_len());
+        assert_eq!(fst2.serialize().len(), fst.serialize().len());
+    }
+
     /// Parse a retail title's decrypted FST and confirm our serializer reproduces it exactly
     /// (up to the trailing content padding). This is the definitive format check.
     #[test]
+    #[ignore = "needs the .dev reference fixtures; run with --ignored"]
     fn reproduces_reference_fst_byte_for_byte() {
         let path = reference_fst_path();
         if !path.exists() {
@@ -340,6 +400,24 @@ mod tests {
             data[ours.len()..].iter().all(|&b| b == 0),
             "trailing bytes should be padding"
         );
+
+        // Content 0 *is* this FST, so its recorded size must be the FST's own length rounded up
+        // to whole 0x8000 sectors — the value our packer now computes up front via
+        // `serialized_len` rather than after the fact.
+        assert_eq!(
+            fst.contents[0].size_sectors as usize,
+            ours.len().div_ceil(0x8000),
+            "content 0 must be sized from the FST's own length"
+        );
+        // And the content table is cumulative: each content starts where the previous one ended.
+        for i in 1..fst.contents.len() {
+            assert_eq!(
+                fst.contents[i].offset_sectors,
+                fst.contents[i - 1].offset_sectors + fst.contents[i - 1].size_sectors,
+                "content {i} must start where content {} ends",
+                i - 1
+            );
+        }
     }
 
     // --- Hostile-input bounds checks ---------------------------------------------------
@@ -355,6 +433,18 @@ mod tests {
         out.extend_from_slice(&content_count.to_be_bytes());
         out.extend_from_slice(&[0u8; 20]);
         out
+    }
+
+    #[test]
+    fn parse_rejects_zero_offset_factor() {
+        // offset_factor = 0 has no valid interpretation (see the check in `parse`) and would
+        // panic `serialize`'s reciprocal division if it were let through.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"FST\0");
+        data.extend_from_slice(&0u32.to_be_bytes()); // offset_factor = 0
+        data.extend_from_slice(&0u32.to_be_bytes()); // content_count = 0
+        data.extend_from_slice(&[0u8; 20]);
+        assert!(Fst::parse(&data).is_none());
     }
 
     #[test]

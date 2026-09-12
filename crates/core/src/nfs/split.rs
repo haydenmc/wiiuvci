@@ -60,11 +60,13 @@ impl SplitWriter {
                 continue;
             }
             let take = remaining.min(data.len() as u64) as usize;
-            let path = Self::file_path(&self.dir, self.index);
+            let (dir, index) = (&self.dir, self.index);
             let writer = self.current.as_mut().expect("writer open");
+            // The path is only wanted for the error message, and this loop runs once per chunk of
+            // a multi-GB stream — build it inside the closure, not on every successful write.
             writer
                 .write_all(&data[..take])
-                .map_err(|e| Error::io(&path, e))?;
+                .map_err(|e| Error::io(Self::file_path(dir, index), e))?;
             self.written_in_current += take as u64;
             self.total_written += take as u64;
             data = &data[take..];

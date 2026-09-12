@@ -2,20 +2,19 @@
 //! into contiguous runs (at 64-cluster hash-group granularity) and report how many EGGS ranges a
 //! sparse NFS would need (limit is 61) and how many bytes it would store.
 //! Run: cargo run -p wiivci-core --release --example frag -- <disc>
-use nod::{Disc, OpenOptions, PartitionKind};
+mod common;
+
+use std::path::Path;
+
+use nod::PartitionKind;
 
 const GROUP: u64 = 64 * 0x8000; // 2 MiB hash group
 
-fn main() {
-    let path = std::env::args().nth(1).expect("usage: frag <disc>");
-    let disc = Disc::new_with_options(
-        &path,
-        &OpenOptions {
-            rebuild_encryption: false,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    common::usage_or_exit(&args, 1, "usage: frag <disc>");
+    let path = Path::new(&args[0]);
+    let disc = common::open_decrypted_disc(path)?;
     let is_wii = disc.header().is_wii();
     let part = disc
         .partitions()
@@ -70,14 +69,7 @@ fn main() {
     // sparse writer does). Compares FST-based "used" vs data-based "non-zero".
     {
         use std::io::{Read, Seek, SeekFrom};
-        let mut d2 = Disc::new_with_options(
-            &path,
-            &OpenOptions {
-                rebuild_encryption: false,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut d2 = common::open_decrypted_disc(path)?;
         let data_start = data_start_sector * 0x8000;
         let mut nonzero_groups = 0u64;
         let mut buf = vec![0u8; GROUP as usize];
@@ -128,4 +120,5 @@ fn main() {
         "contiguous runs (= EGGS data ranges needed) = {}  [limit 61, plus 2 for disc header/part table]",
         runs
     );
+    Ok(())
 }

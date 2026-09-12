@@ -1,13 +1,19 @@
 //! Best-effort game title lookup against GameTDB's flat `wiitdb.txt` database.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use crate::error::Result;
+use super::http_client;
 
 const WIITDB_URL: &str = "https://www.gametdb.com/wiitdb.txt?LANG=EN";
 const CACHE_FILE_NAME: &str = "wiitdb-en.txt";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a cached `wiitdb.txt` is trusted before we try to refresh it. GameTDB has no
+/// versioning to poll cheaply, so this is a coarse compromise: long enough not to hit the
+/// server on every run, short enough that a title added to GameTDB shows up within about a
+/// week without the user needing to know a cache exists at all.
+const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A per-user subdirectory name under the system temp dir, so the cache file doesn't live at a
 /// fixed, world-guessable path (symlink/pre-creation hazard on multi-user hosts).
@@ -57,7 +63,12 @@ fn cache_dir() -> Option<PathBuf> {
         if let Ok(meta) = std::fs::metadata(&dir) {
             let mut perms = meta.permissions();
             perms.set_mode(0o700);
-            let _ = std::fs::set_permissions(&dir, perms);
+            if let Err(e) = std::fs::set_permissions(&dir, perms) {
+                log::warn!(
+                    "failed to lock down cache dir {} to owner-only: {e}",
+                    dir.display()
+                );
+            }
         }
     }
 
@@ -126,15 +137,58 @@ fn parse_wiitdb(text: &str, id: &str) -> Option<String> {
     None
 }
 
-/// Fetch the wiitdb.txt contents, using a cached copy in the per-user temp dir if it's present
-/// and looks valid, otherwise downloading and caching it. Returns `None` on any network failure
-/// or if the downloaded content doesn't look like a real wiitdb.
+/// Whether a cache file last modified at `modified` is still fresh at `now`, given `ttl`. A pure
+/// function of its three inputs (no filesystem or clock access) so the freshness policy is
+/// unit-testable without a real cache file.
+fn cache_is_fresh(modified: SystemTime, now: SystemTime, ttl: Duration) -> bool {
+    match now.duration_since(modified) {
+        Ok(age) => age < ttl,
+        // `modified` is later than `now` (clock skew, or a file written this same instant) —
+        // there's no sensible "age" to compare against `ttl`, so treat it as fresh rather than
+        // looping on a refetch every call.
+        Err(_) => true,
+    }
+}
+
+/// Log `msg` as a failure, then fall back to `stale` (an out-of-date but still well-formed
+/// cached copy) if one is available — a transient network hiccup should degrade to "use the old
+/// data" rather than "no title database at all" when we have something to fall back to.
+fn warn_and_use_stale(msg: impl std::fmt::Display, stale: Option<String>) -> Option<String> {
+    log::warn!("{msg}");
+    if stale.is_some() {
+        log::warn!("falling back to the stale cached wiitdb");
+    }
+    stale
+}
+
+/// Fetch the wiitdb.txt contents, using a cached copy in the per-user temp dir if it's present,
+/// looks valid, and is within [`CACHE_TTL`]; otherwise downloading a fresh copy and caching it.
+/// A cached copy past its TTL is kept as a fallback if the download fails, rather than treated
+/// as unusable. Returns `None` only when there is neither a valid cache nor a successful
+/// download.
 fn fetch_wiitdb_text() -> Option<String> {
     let path = cache_path();
 
+    let mut stale_cached: Option<String> = None;
     if let Some(path) = &path {
         match std::fs::read_to_string(path) {
-            Ok(text) if looks_like_wiitdb(&text) => return Some(text),
+            Ok(text) if looks_like_wiitdb(&text) => {
+                let fresh = std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .map(|modified| cache_is_fresh(modified, SystemTime::now(), CACHE_TTL))
+                    // If the mtime can't be read, don't force a refetch on every call — the
+                    // content check above already confirmed this looks like a real wiitdb.
+                    .unwrap_or(true);
+                if fresh {
+                    return Some(text);
+                }
+                log::debug!(
+                    "cached wiitdb at {} is past its {}-day freshness window; refreshing",
+                    path.display(),
+                    CACHE_TTL.as_secs() / 86_400
+                );
+                stale_cached = Some(text);
+            }
             Ok(_) => {
                 log::debug!(
                     "cached wiitdb at {} doesn't look valid; refreshing",
@@ -146,44 +200,40 @@ fn fetch_wiitdb_text() -> Option<String> {
         }
     }
 
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-    {
+    let client = match http_client(FETCH_TIMEOUT) {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("failed to build HTTP client: {e}");
-            return None;
+            return warn_and_use_stale(format!("failed to build HTTP client: {e}"), stale_cached)
         }
     };
 
     let response = match client.get(WIITDB_URL).send() {
         Ok(resp) => resp,
         Err(e) => {
-            log::warn!("failed to reach gametdb.com: {e}");
-            return None;
+            return warn_and_use_stale(format!("failed to reach gametdb.com: {e}"), stale_cached)
         }
     };
 
     let response = match response.error_for_status() {
         Ok(resp) => resp,
-        Err(e) => {
-            log::warn!("wiitdb request failed: {e}");
-            return None;
-        }
+        Err(e) => return warn_and_use_stale(format!("wiitdb request failed: {e}"), stale_cached),
     };
 
     let text = match response.text() {
         Ok(t) => t,
         Err(e) => {
-            log::warn!("failed to read wiitdb response body: {e}");
-            return None;
+            return warn_and_use_stale(
+                format!("failed to read wiitdb response body: {e}"),
+                stale_cached,
+            )
         }
     };
 
     if !looks_like_wiitdb(&text) {
-        log::warn!("downloaded wiitdb from {WIITDB_URL} doesn't look valid; not using it");
-        return None;
+        return warn_and_use_stale(
+            format!("downloaded wiitdb from {WIITDB_URL} doesn't look valid; not using it"),
+            stale_cached,
+        );
     }
 
     if let Some(path) = &path {
@@ -208,17 +258,50 @@ fn fetch_wiitdb_text() -> Option<String> {
 
 /// Look up the English title for a 6-character Wii game ID (e.g. `"RSPE01"`) in GameTDB.
 ///
-/// This is best-effort: any network failure yields `Ok(None)` rather than an error.
-pub fn lookup_title(game_id6: &str) -> Result<Option<String>> {
-    let Some(text) = fetch_wiitdb_text() else {
-        return Ok(None);
-    };
-    Ok(parse_wiitdb(&text, game_id6))
+/// This is best-effort: any network failure yields `None` rather than an error — every failure
+/// is already `warn`ed inside [`fetch_wiitdb_text`], so there is nothing left for a caller to do
+/// with an `Err`.
+pub fn lookup_title(game_id6: &str) -> Option<String> {
+    let text = fetch_wiitdb_text()?;
+    parse_wiitdb(&text, game_id6)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_is_fresh_within_ttl() {
+        let now = SystemTime::now();
+        let ttl = Duration::from_secs(7 * 24 * 60 * 60);
+        assert!(cache_is_fresh(now - Duration::from_secs(60), now, ttl));
+        assert!(cache_is_fresh(
+            now - (ttl - Duration::from_secs(1)),
+            now,
+            ttl
+        ));
+    }
+
+    #[test]
+    fn cache_is_fresh_past_ttl() {
+        let now = SystemTime::now();
+        let ttl = Duration::from_secs(7 * 24 * 60 * 60);
+        assert!(!cache_is_fresh(now - ttl, now, ttl));
+        assert!(!cache_is_fresh(
+            now - (ttl + Duration::from_secs(1)),
+            now,
+            ttl
+        ));
+    }
+
+    #[test]
+    fn cache_is_fresh_treats_future_mtime_as_fresh() {
+        // Clock skew (or a file written this same instant) must not be treated as infinitely
+        // stale — `duration_since` errors, and we should fail open rather than refetch forever.
+        let now = SystemTime::now();
+        let ttl = Duration::from_secs(60);
+        assert!(cache_is_fresh(now + Duration::from_secs(3600), now, ttl));
+    }
 
     const SAMPLE: &str = "\
 # comment line

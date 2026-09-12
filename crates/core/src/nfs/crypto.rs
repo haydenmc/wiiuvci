@@ -21,10 +21,12 @@ fn sector_iv(logical_sector: u32) -> [u8; 16] {
 /// Encrypt one logical sector in place.
 ///
 /// `buf.len()` must be a multiple of the 16-byte AES block — every caller passes a whole
-/// [`crate::input::DISC_SECTOR_SIZE`] sector. The invariant is checked by `debug_assert` in test
-/// builds; in release only the block-aligned prefix (`len & !15`) is transformed and any trailing
-/// partial block is left untouched, so a mis-sized buffer degrades instead of panicking (CBC with
-/// `NoPadding` errors on a ragged length, and the old `.expect()` turned that into a panic).
+/// [`crate::input::DISC_SECTOR_SIZE`] sector, so the invariant is entirely caller-controlled and
+/// cannot be violated by disc/asset data. It is therefore an `expect`, not a soft failure: the
+/// only way CBC/`NoPadding` can error here is a ragged length, and the previous "transform the
+/// aligned prefix and swallow the error" fallback would have written the tail out as **plaintext**
+/// in a release build — silently shipping unencrypted bytes into the NFS is far worse than a
+/// panic that names the broken invariant.
 #[inline]
 pub fn encrypt_sector(key: &[u8; 16], logical_sector: u32, buf: &mut [u8]) {
     debug_assert_eq!(
@@ -33,14 +35,11 @@ pub fn encrypt_sector(key: &[u8; 16], logical_sector: u32, buf: &mut [u8]) {
         "NFS sector buffers must be a whole number of AES blocks"
     );
     let iv = sector_iv(logical_sector);
-    let len = aligned_len(buf);
-    if aes_cbc::encrypt(key, iv, &mut buf[..len]).is_err() {
-        debug_assert!(false, "NoPadding on a block-aligned buffer cannot fail");
-    }
+    aes_cbc::encrypt(key, iv, buf).expect("NoPadding on a block-aligned buffer cannot fail");
 }
 
 /// Decrypt one logical sector in place (inverse of [`encrypt_sector`]); used by tests. Same
-/// length invariant and guard as [`encrypt_sector`].
+/// caller-controlled length invariant — and the same `expect` — as [`encrypt_sector`].
 #[inline]
 pub fn decrypt_sector(key: &[u8; 16], logical_sector: u32, buf: &mut [u8]) {
     debug_assert_eq!(
@@ -49,21 +48,11 @@ pub fn decrypt_sector(key: &[u8; 16], logical_sector: u32, buf: &mut [u8]) {
         "NFS sector buffers must be a whole number of AES blocks"
     );
     let iv = sector_iv(logical_sector);
-    let len = aligned_len(buf);
-    if aes_cbc::decrypt(key, iv, &mut buf[..len]).is_err() {
-        debug_assert!(false, "NoPadding on a block-aligned buffer cannot fail");
-    }
+    aes_cbc::decrypt(key, iv, buf).expect("NoPadding on a block-aligned buffer cannot fail");
 }
 
 /// AES block size; sector buffers must be a multiple of this.
 const BLOCK: usize = 16;
-
-/// Length of the leading whole-AES-block region of `buf` (equal to `buf.len()` for every real
-/// caller, which always passes a full sector).
-#[inline]
-fn aligned_len(buf: &[u8]) -> usize {
-    buf.len() & !(BLOCK - 1)
-}
 
 #[cfg(test)]
 mod tests {
@@ -89,19 +78,18 @@ mod tests {
         assert_eq!(buf, original);
     }
 
-    /// A buffer that is not a whole number of AES blocks must not panic: the ragged tail is left
-    /// untouched. Only meaningful with `debug_assertions` off (the `debug_assert` fires first in a
-    /// debug build), which is how the gates run these tests (`cargo test --release`).
+    /// A buffer that is not a whole number of AES blocks is a broken caller invariant and must
+    /// panic rather than leave the ragged tail as plaintext. Only meaningful with
+    /// `debug_assertions` off (in a debug build the `debug_assert_eq!` fires first — also a
+    /// panic, just a different message), which is how the gates run these tests
+    /// (`cargo test --release`).
     #[test]
     #[cfg(not(debug_assertions))]
-    fn ragged_buffer_does_not_panic_and_leaves_tail_untouched() {
+    #[should_panic(expected = "NoPadding on a block-aligned buffer cannot fail")]
+    fn ragged_buffer_panics_instead_of_leaving_plaintext() {
         let key = [0x33u8; 16];
         let mut buf = [0xAAu8; 20]; // one whole block + 4 bytes
         encrypt_sector(&key, 7, &mut buf);
-        assert_ne!(&buf[..16], &[0xAAu8; 16], "the whole block is encrypted");
-        assert_eq!(&buf[16..], &[0xAAu8; 4], "the ragged tail is untouched");
-        decrypt_sector(&key, 7, &mut buf);
-        assert_eq!(buf, [0xAAu8; 20]);
     }
 
     #[test]

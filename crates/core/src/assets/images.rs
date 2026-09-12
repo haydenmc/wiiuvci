@@ -54,12 +54,47 @@ impl BootTexture {
     }
 }
 
+/// Largest artwork dimension (in pixels) accepted from a PNG, per axis.
+///
+/// Every texture we produce is at most 1280x720, so anything remotely this large is already far
+/// beyond useful — the cap exists to stop a hostile or corrupt PNG header (artwork can come from
+/// a user-supplied file *or* a download) from making the decoder allocate for a multi-gigapixel
+/// image before anything notices.
+const MAX_SOURCE_DIM: u32 = 8192;
+
+/// Largest total allocation the PNG decoder may make (256 MiB). 8192x8192 RGBA is 256 MiB, so
+/// this is the matching bound on the other axis of the same attack: a header that stays under the
+/// dimension caps but still asks for an enormous buffer.
+const MAX_DECODE_ALLOC: u64 = 256 << 20;
+
+/// Decode a PNG (or any format `image` guesses from the bytes) under explicit resource limits.
+///
+/// `image::load_from_memory` applies no dimension cap at all, so a 16-byte IHDR claiming
+/// 60000x60000 is enough to drive a huge allocation. Going through `ImageReader` lets us install
+/// [`Limits`](image::Limits) *before* the decode, so an oversized header is rejected as an error
+/// instead.
+fn decode_limited(png_bytes: &[u8]) -> Result<image::DynamicImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(png_bytes))
+        .with_guessed_format()
+        .map_err(|e| Error::Other(anyhow::anyhow!("failed to read PNG header: {e}")))?;
+    // `Limits` is `#[non_exhaustive]`, so it can only be built by mutating the default (which
+    // already caps `max_alloc`); that also means any limit added by a future `image` release
+    // keeps its default rather than being silently disabled.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_DIM);
+    limits.max_image_height = Some(MAX_SOURCE_DIM);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| Error::Other(anyhow::anyhow!("failed to decode PNG: {e}")))
+}
+
 /// Decode `png_bytes`, resize it to exactly `tex`'s dimensions, and hand-encode it as an
 /// uncompressed, bottom-up TGA in the pixel format the console expects (BGR for 24bpp
 /// textures, BGRA for 32bpp textures).
 pub fn png_to_tga(png_bytes: &[u8], tex: BootTexture) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(png_bytes)
-        .map_err(|e| Error::Other(anyhow::anyhow!("failed to decode PNG: {e}")))?;
+    let img = decode_limited(png_bytes)?;
 
     let (width, height) = tex.dims();
     let resized = img.resize_exact(width, height, FilterType::Lanczos3);
@@ -169,6 +204,69 @@ mod tests {
         let tga = png_to_tga(&png, BootTexture::BootLogo).expect("convert");
         assert_header(&tga, BootTexture::BootLogo);
         assert_eq!(&tga[18..22], &[0x00, 0x00, 0xFF, 0xFF]);
+    }
+
+    /// CRC-32 (IEEE, the PNG variant) over `data`, so the hand-built header below is a *valid*
+    /// PNG chunk — otherwise the decoder would reject it on the checksum and the test would pass
+    /// without ever exercising the limits.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A PNG signature plus a well-formed IHDR declaring `width`x`height` 8-bit truecolor, and
+    /// nothing else. Enough for the decoder to read the dimensions (and therefore to check them
+    /// against the limits) without any image data at all.
+    fn png_header_declaring(width: u32, height: u32) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(b"IHDR");
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // bit depth, truecolor, deflate, adaptive, no interlace
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        out.extend_from_slice(&13u32.to_be_bytes());
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&crc32(&ihdr).to_be_bytes());
+        out
+    }
+
+    /// A PNG whose header declares an absurd size must be rejected before the decoder allocates
+    /// for it — `image::load_from_memory` would have happily tried (60000x60000 RGBA is ~13 GiB).
+    #[test]
+    fn oversized_png_header_is_rejected_by_the_decode_limits() {
+        let png = png_header_declaring(60_000, 60_000);
+        let err =
+            png_to_tga(&png, BootTexture::Icon).expect_err("a 60000x60000 PNG must not be decoded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds limit"),
+            "the rejection must come from the decode limits, not from the truncated data: {msg}"
+        );
+    }
+
+    /// The limits must not get in the way of ordinary artwork: a real (tiny) PNG still converts.
+    #[test]
+    fn small_real_png_still_converts_under_the_limits() {
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(2, 2, Rgba([0, 255, 0, 255]));
+        let mut png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode png");
+        let tga = png_to_tga(&png, BootTexture::Icon).expect("a 2x2 PNG must convert");
+        assert_header(&tga, BootTexture::Icon);
+        // Solid green -> BGRA = 00 FF 00 FF.
+        assert_eq!(&tga[18..22], &[0x00, 0xFF, 0x00, 0xFF]);
     }
 
     #[test]

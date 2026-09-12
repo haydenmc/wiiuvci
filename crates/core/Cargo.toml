@@ -3,6 +3,7 @@ name = "wiivci-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "Library for injecting Wii games into Wii U Virtual Console (WUP) packages"
 

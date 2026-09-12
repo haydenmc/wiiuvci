@@ -38,7 +38,8 @@ use sha1::{Digest, Sha1};
 
 use crate::consts::{CLUSTER_DATA, HASH_BLOCK, SECTORS_PER_GROUP, TMD_CONTENT0_HASH};
 use crate::disc_patch::{
-    h3_entry_mut, recompute_group, DiscPlan, PartitionPlan, H3_TABLE_SIZE, MAX_H3_GROUPS,
+    h3_entry_mut, recompute_group, DiscPlan, PartitionPlan, StoredGroups, H3_TABLE_SIZE,
+    MAX_H3_GROUPS,
 };
 use crate::error::{Error, Result};
 use crate::input::{DecryptedDisc, PartitionSpan, ReadSeek, DISC_SECTOR_SIZE};
@@ -95,10 +96,10 @@ const TMD_PART_OFF: u64 = 0x2C0;
 const CERT_PART_OFF: u64 = 0x4E0; // cert chain: after the TMD, before H3 (matches retail discs)
 const H3_PART_OFF: u64 = 0x8000;
 const DATA_PART_OFF: u64 = 0x20000;
-const DATA_ABS: u64 = PART_ABS + DATA_PART_OFF; // 0x70000
+const DATA_ABS: u64 = PART_ABS + DATA_PART_OFF; // 0xF820000
 
-const START_SECTOR: u32 = (PART_ABS / SECTOR) as u32; // 10
-const DATA_START_SECTOR: u32 = (DATA_ABS / SECTOR) as u32; // 14
+const START_SECTOR: u32 = (PART_ABS / SECTOR) as u32; // 0x1F00 (7936)
+const DATA_START_SECTOR: u32 = (DATA_ABS / SECTOR) as u32; // 0x1F04 (7940)
 
 // Logical partition-data layout.
 const BOOT_BIN_LEN: usize = 0x440;
@@ -175,6 +176,21 @@ pub struct AuthoredDisc {
     pub rvlt_ticket: Vec<u8>,
     /// The disc's Wii TMD bytes, to be written as `code/rvlt.tmd`.
     pub rvlt_tmd: Vec<u8>,
+}
+
+impl AuthoredDisc {
+    /// Consume the disc, closing its scratch file and returning `(rvlt_ticket, rvlt_tmd)`.
+    ///
+    /// The caller deletes the (disc-sized) scratch image as soon as the NFS is built, and still
+    /// needs the ticket/TMD afterwards. Taking them by field leaves `self` — and therefore the
+    /// open [`File`] — alive until the end of the enclosing scope, which on Windows makes
+    /// `remove_file` fail outright with a sharing violation, and on every platform delays
+    /// reclaiming the blocks. A *partial* destructure does not help either: the `file` field
+    /// simply keeps living in the partially-moved value. Consuming `self` here is what actually
+    /// drops the handle.
+    pub fn into_rvlt(self) -> (Vec<u8>, Vec<u8>) {
+        (self.rvlt_ticket, self.rvlt_tmd)
+    }
 }
 
 impl DecryptedDisc for AuthoredDisc {
@@ -287,10 +303,28 @@ fn pad_to(v: &mut Vec<u8>, len: usize) {
     }
 }
 
+/// Write `title` into the fixed-size, NUL-terminated `dst` field of the disc header.
+///
+/// Titles come from the user (`--title`) or from GameTDB, so they can be longer than the field and
+/// can contain multi-byte UTF-8 (accented European titles, Japanese names). Truncating at a raw
+/// byte index would cut a multi-byte sequence in half and leave a partial code point on the disc,
+/// so the cut is moved back to the nearest char boundary — and truncating at all is logged, since
+/// the title shown on the disc then differs from the one the user asked for.
 fn write_title(dst: &mut [u8], title: &str) {
-    let b = title.as_bytes();
-    let n = b.len().min(dst.len() - 1);
-    dst[..n].copy_from_slice(&b[..n]);
+    let max = dst.len() - 1; // leave room for the NUL terminator
+    let mut n = title.len().min(max);
+    while n > 0 && !title.is_char_boundary(n) {
+        n -= 1;
+    }
+    if n < title.len() {
+        log::warn!(
+            "disc title '{title}' is {} bytes; truncating to '{}' to fit the {max}-byte disc \
+             header field",
+            title.len(),
+            &title[..n]
+        );
+    }
+    dst[..n].copy_from_slice(&title.as_bytes()[..n]);
 }
 
 /// A Wii disc title id (`00010000_<4-char game code>`) for the synthetic carrier disc. The Wii
@@ -478,6 +512,12 @@ pub fn author_gc_disc(
         data_start_sector: DATA_START_SECTOR,
         data_end_sector: DATA_START_SECTOR + total_clusters as u32,
     };
+    // The span is synthesized from constants above rather than read from a disc, but validating
+    // it keeps the invariant `crate::nfs` relies on in one place (and catches a future layout
+    // edit that reorders these constants).
+    span.validate()?;
+    // `h3_table` is last borrowed by `build_partition_header` above, so it can move into the plan
+    // here; `build_nfs` compares the H3 it recomputes per group against this copy.
     let plan = DiscPlan {
         partitions: vec![PartitionPlan {
             start_sector: span.start_sector,
@@ -485,13 +525,13 @@ pub fn author_gc_disc(
             data_end_sector: span.data_end_sector,
             header_patches: Vec::new(),
             edits: Vec::new(),
+            h3_table,
             // The synthetic GC disc is compact (Nintendont + game.iso, no gaps); store all groups.
-            stored_data_groups: Vec::new(),
+            stored_data_groups: StoredGroups::All,
         }],
         // The authored disc already has a single DATA partition and a matching table.
         disc_patches: Vec::new(),
-        rvlt_content_hash: Some(content_hash),
-        applied: Vec::new(),
+        rvlt_content_hash: content_hash,
     };
 
     Ok(AuthoredDisc {
@@ -535,11 +575,11 @@ fn fill_cluster_data(
         let e = end.min(iso_end);
         if s < e {
             iso.seek(SeekFrom::Start(s - iso_off))
-                .map_err(|err| Error::io("<game.iso>", err))?;
+                .map_err(|err| Error::read("the embedded game.iso", err))?;
             let doff = (s - start) as usize;
             let n = (e - s) as usize;
             iso.read_exact(&mut dst[doff..doff + n])
-                .map_err(|err| Error::io("<game.iso>", err))?;
+                .map_err(|err| Error::read("the embedded game.iso", err))?;
         }
     }
     Ok(())
@@ -778,7 +818,7 @@ mod tests {
         .unwrap();
 
         // The disc's TMD content hash must equal SHA1(H3 table) — the invariant a Wii VC checks.
-        let content_hash = authored.plan.rvlt_content_hash.unwrap();
+        let content_hash = authored.plan.rvlt_content_hash;
         assert_eq!(
             &authored.rvlt_tmd[TMD_CONTENT0_HASH..TMD_CONTENT0_HASH + 20],
             content_hash.as_slice()
@@ -789,7 +829,11 @@ mod tests {
         let nfs_dir = out.path().join("content");
         std::fs::create_dir_all(&nfs_dir).unwrap();
         let plan = authored.plan.clone();
-        build_nfs(&mut authored, &htk, &nfs_dir, &plan).unwrap();
+        let stats = build_nfs(&mut authored, &htk, &nfs_dir, &plan).unwrap();
+        assert_eq!(
+            stats.h3_mismatches, 0,
+            "every authored group's H3 must match the table written into the partition header"
+        );
         std::fs::write(nfs_dir.join("htk.bin"), htk).unwrap();
 
         // Reopen with hash validation on.
@@ -829,6 +873,219 @@ mod tests {
         part.seek(SeekFrom::Start(iso_data_off)).unwrap();
         part.read_exact(&mut iso_back).unwrap();
         assert_eq!(iso_back, iso, "game.iso must extract byte-identically");
+    }
+
+    /// The disc-header title field is a fixed 0x40-byte, NUL-terminated array. Titles come from
+    /// `--title`/GameTDB and can be multi-byte UTF-8, so a raw byte-index truncation could leave
+    /// half a code point on the disc. The cut must land on a char boundary.
+    #[test]
+    fn write_title_truncates_on_a_char_boundary() {
+        // The real callers hand over an already-zeroed field (so the NUL terminator is implicit);
+        // 0xFF here makes it visible exactly how many bytes `write_title` touched.
+        let mut dst = [0xFFu8; 0x40]; // 63 usable bytes + the terminator byte
+
+        // A short ASCII title is written verbatim and nothing else is touched.
+        write_title(&mut dst, "GC Test");
+        assert_eq!(&dst[..7], b"GC Test");
+        assert!(dst[7..].iter().all(|&b| b == 0xFF), "tail untouched");
+
+        // 60 ASCII bytes then a 4-byte emoji = 64 bytes: the emoji straddles the 63-byte cut, so
+        // the whole code point must be dropped rather than split.
+        let mut dst = [0xFFu8; 0x40];
+        let title = format!("{}\u{1F600}", "a".repeat(60));
+        assert_eq!(title.len(), 64);
+        write_title(&mut dst, &title);
+        assert_eq!(&dst[..60], "a".repeat(60).as_bytes());
+        assert!(
+            dst[60..].iter().all(|&b| b == 0xFF),
+            "the split code point must be dropped whole, not written in part"
+        );
+        std::str::from_utf8(&dst[..60]).expect("the written title must stay valid UTF-8");
+
+        // A long pure-ASCII title still fills all 63 usable bytes, leaving the terminator byte.
+        let mut dst = [0xFFu8; 0x40];
+        write_title(&mut dst, &"b".repeat(100));
+        assert_eq!(&dst[..63], "b".repeat(63).as_bytes());
+        assert_eq!(dst[63], 0xFF, "the terminator byte is never written over");
+    }
+
+    /// `into_rvlt` must hand back the ticket/TMD *and* close the scratch file, so the caller can
+    /// delete the (disc-sized) image before the rest of the build runs. On Windows deleting a file
+    /// that is still open fails outright, so this is a correctness bug there, not just a scratch-
+    /// space one — and a partial destructure of `AuthoredDisc` would not fix it, since the `file`
+    /// field stays alive in the partially-moved value.
+    #[test]
+    fn into_rvlt_closes_the_scratch_file() {
+        let iso: Vec<u8> = (0..200_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let main_dol: Vec<u8> = (0..4096u32).map(|i| (i ^ 0xA5) as u8).collect();
+
+        let out = tempfile::tempdir().unwrap();
+        let disc_path = out.path().join("gc_disc.img");
+        let mut cur = Cursor::new(iso.clone());
+        let authored = author_gc_disc(
+            &mut cur,
+            iso.len() as u64,
+            &GcDiscInputs {
+                game_id: *b"GM2E8P",
+                disc_title: "GC Test",
+                main_dol: &main_dol,
+                apploader: &[],
+                cert_chain: &[],
+            },
+            &disc_path,
+        )
+        .unwrap();
+
+        let expected_ticket = authored.rvlt_ticket.clone();
+        let expected_tmd = authored.rvlt_tmd.clone();
+        assert!(disc_path.exists());
+
+        let (ticket, tmd) = authored.into_rvlt();
+        assert_eq!(ticket, expected_ticket);
+        assert_eq!(tmd, expected_tmd);
+
+        std::fs::remove_file(&disc_path).expect("the scratch file must no longer be open");
+        assert!(!disc_path.exists());
+    }
+
+    /// Table test for [`fill_cluster_data`]: a cluster entirely in the sys blob, one straddling
+    /// the sys-blob/ISO boundary (`iso_off` mid-cluster), one entirely inside the ISO, one
+    /// straddling the ISO end (the tail must stay zero), and one entirely past the end.
+    #[test]
+    fn fill_cluster_data_table() {
+        let sys_blob: Vec<u8> = (0..40u8).collect(); // sys_blob[i] == i
+        let iso_data: Vec<u8> = (0..20u8).map(|i| 0x80 + i).collect();
+        let iso_off = 32u64;
+        let iso_size = iso_data.len() as u64; // ISO spans logical [32, 52)
+
+        struct Case {
+            name: &'static str,
+            logical_off: u64,
+            len: usize,
+            expect: Vec<u8>,
+        }
+
+        let cases = vec![
+            Case {
+                name: "entirely in the sys blob",
+                logical_off: 0,
+                len: 16,
+                expect: sys_blob[0..16].to_vec(),
+            },
+            Case {
+                name: "straddles the sys-blob/ISO boundary",
+                logical_off: 24,
+                len: 16,
+                expect: {
+                    let mut v = sys_blob[24..32].to_vec();
+                    v.extend_from_slice(&iso_data[0..8]);
+                    v
+                },
+            },
+            Case {
+                name: "entirely inside the ISO",
+                logical_off: 36,
+                len: 8,
+                expect: iso_data[4..12].to_vec(),
+            },
+            Case {
+                name: "straddles the ISO end; tail stays zero",
+                logical_off: 48,
+                len: 16,
+                expect: {
+                    let mut v = iso_data[16..20].to_vec();
+                    v.extend(std::iter::repeat_n(0u8, 12));
+                    v
+                },
+            },
+            Case {
+                name: "entirely past the end",
+                logical_off: 64,
+                len: 16,
+                expect: vec![0u8; 16],
+            },
+        ];
+
+        for case in cases {
+            let mut dst = vec![0u8; case.len];
+            let mut iso_cur = Cursor::new(iso_data.clone());
+            fill_cluster_data(
+                &mut dst,
+                case.logical_off,
+                &sys_blob,
+                &mut iso_cur,
+                iso_off,
+                iso_size,
+            )
+            .unwrap();
+            assert_eq!(dst, case.expect, "case: {}", case.name);
+        }
+    }
+
+    /// The FST is 24 bytes of entries + 9 bytes of string table, padded to a 4-byte multiple
+    /// (36); the root entry count is 2; `game.iso`'s offset/size fields carry `iso_off >> 2` and
+    /// `iso_size`.
+    #[test]
+    fn build_fst_layout_and_fields() {
+        let iso_off = 0x1F_0000u64;
+        let iso_size = 0x1234_5678u64;
+        let fst = build_fst(iso_off, iso_size).unwrap();
+        assert_eq!(fst.len(), 36);
+
+        // Root directory entry: type=1, name_off=0, parent=0, arg1 = entry count (2).
+        assert_eq!(fst[0], 1);
+        assert_eq!(&fst[1..4], &[0, 0, 0]);
+        assert_eq!(&fst[4..8], &0u32.to_be_bytes());
+        assert_eq!(&fst[8..12], &2u32.to_be_bytes());
+
+        // game.iso entry: type=0, name_off=0, offset>>2, size.
+        assert_eq!(fst[12], 0);
+        assert_eq!(&fst[13..16], &[0, 0, 0]);
+        assert_eq!(&fst[16..20], &((iso_off >> 2) as u32).to_be_bytes());
+        assert_eq!(&fst[20..24], &(iso_size as u32).to_be_bytes());
+
+        // String table, padded to a 4-byte multiple.
+        assert_eq!(&fst[24..33], b"game.iso\0");
+        assert_eq!(&fst[33..36], &[0, 0, 0]);
+    }
+
+    /// `build_sys_blob` places `main.dol` 0x20-aligned after the apploader, the FST 0x20-aligned
+    /// after the DOL, `game.iso` at a `GROUP_LOGICAL_SIZE` (0x1F0000) multiple, and writes those
+    /// `>> 2` fields into boot.bin at 0x420/0x424/0x428/0x42C.
+    #[test]
+    fn build_sys_blob_layout_and_boot_fields() {
+        let game_id = *b"GM2E8P";
+        let apploader = vec![0xAAu8; 0x13]; // deliberately not 0x20-aligned in length
+        let main_dol = vec![0xBBu8; 0x101]; // deliberately not 0x20-aligned in length
+        let iso_size = 12_345u64;
+
+        let (sys, iso_off) =
+            build_sys_blob(&game_id, "Title", &apploader, &main_dol, iso_size).unwrap();
+
+        let dol_off = align_up(APPLOADER_OFF + apploader.len(), ALIGN);
+        assert_eq!(dol_off % ALIGN, 0);
+        assert_eq!(&sys[dol_off..dol_off + main_dol.len()], main_dol.as_slice());
+
+        let fst_off = align_up(dol_off + main_dol.len(), ALIGN);
+        assert_eq!(fst_off % ALIGN, 0);
+
+        assert_eq!(
+            iso_off % GROUP_LOGICAL_SIZE,
+            0,
+            "game.iso must land on a hash-group boundary"
+        );
+        assert!(iso_off >= fst_off as u64);
+
+        let field = |off: usize| -> u64 {
+            (u32::from_be_bytes(sys[off..off + 4].try_into().unwrap()) as u64) << 2
+        };
+        assert_eq!(field(BOOT_DOL_OFF_FIELD), dol_off as u64);
+        assert_eq!(field(BOOT_FST_OFF_FIELD), fst_off as u64);
+        let fst_len = align_up(2 * 12 + b"game.iso\0".len(), 4);
+        assert_eq!(field(BOOT_FST_SIZE_FIELD), fst_len as u64);
+        assert_eq!(field(BOOT_FST_MAX_FIELD), fst_len as u64);
     }
 
     /// Full-size end-to-end: author a synthetic disc from a real GameCube image, pack to NFS, and

@@ -7,6 +7,8 @@
 //! No decryption keys or Nintendo binaries are bundled: the Wii common key, the Wii U
 //! common key, and the base title are all supplied by the user at runtime.
 
+#![warn(missing_docs)]
+
 pub(crate) mod aes_cbc;
 pub(crate) mod apploader;
 pub mod assets;

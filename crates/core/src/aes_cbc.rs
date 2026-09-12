@@ -2,11 +2,10 @@
 //!
 //! Both the NFS per-sector encoder ([`crate::nfs::crypto`]) and the WUP content encoder
 //! ([`crate::package::content_crypto`]) drive the same `cbc`/`aes` cipher construction with
-//! `NoPadding`, differing only in how each wraps the result (the NFS side degrades a mis-sized
-//! buffer via `debug_assert` + an aligned-prefix guard, since it is invoked with values it fully
-//! controls; the content side propagates a `Result`, since it decodes untrusted/possibly-corrupt
-//! input). This module holds only the identical cipher call; callers keep their own
-//! error-handling semantics on top.
+//! `NoPadding`, differing only in how each wraps the result (the NFS side `expect`s success,
+//! since it is invoked only with whole sectors it fully controls; the content side propagates a
+//! `Result`, since it decodes untrusted/possibly-corrupt input). This module holds only the
+//! identical cipher call; callers keep their own error-handling semantics on top.
 
 use aes::cipher::block_padding::{NoPadding, UnpadError};
 use aes::cipher::inout::PadError;

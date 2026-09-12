@@ -15,14 +15,13 @@ use std::path::{Path, PathBuf};
 
 use nod::{Disc, OpenOptions, PartitionKind, SECTOR_SIZE};
 
+use crate::consts::{CLUSTER_DATA_U64, SECTORS_PER_GROUP_U64};
 use crate::error::{Error, Result};
 
-/// Logical (hash-stripped) bytes per disc cluster (must match [`crate::consts::CLUSTER_DATA`]).
-const LOG_CLUSTER: u64 = crate::consts::CLUSTER_DATA as u64;
-/// Clusters per Wii hash group.
-const GROUP_CLUSTERS: u64 = 64;
-/// Logical bytes covered by one hash group.
-const GROUP_BYTES: u64 = GROUP_CLUSTERS * LOG_CLUSTER;
+/// Logical (hash-stripped) bytes covered by one 64-cluster hash group. Derived rather than
+/// re-declared: [`crate::consts`] owns the layout numbers, and the `_U64` forms exist because
+/// every offset in this module is a `u64`.
+const GROUP_BYTES: u64 = SECTORS_PER_GROUP_U64 * CLUSTER_DATA_U64;
 
 /// Upper bound on the size of a `main.dol` we are willing to parse and buffer.
 ///
@@ -108,8 +107,8 @@ fn extent_groups(
              partition data region"
         )));
     };
-    let first = off / LOG_CLUSTER / GROUP_CLUSTERS;
-    let last = (end - 1) / LOG_CLUSTER / GROUP_CLUSTERS;
+    let first = off / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
+    let last = (end - 1) / CLUSTER_DATA_U64 / SECTORS_PER_GROUP_U64;
     Ok(Some(first..=last))
 }
 
@@ -146,8 +145,8 @@ fn plan_group_runs(
     skip_gaps: bool,
     zero_extents: &[(u64, u64)],
 ) -> Result<Vec<(u32, u32)>> {
-    let ngroups = clusters.div_ceil(GROUP_CLUSTERS) as usize;
-    let data_size = clusters * LOG_CLUSTER;
+    let ngroups = clusters.div_ceil(SECTORS_PER_GROUP_U64) as usize;
+    let data_size = clusters * CLUSTER_DATA_U64;
     let mut used = vec![false; ngroups];
 
     for &(off, len) in extents {
@@ -252,6 +251,31 @@ pub struct PartitionSpan {
     pub data_end_sector: u32,
 }
 
+impl PartitionSpan {
+    /// Check that the span is ordered: `start_sector <= data_start_sector <= data_end_sector`.
+    ///
+    /// These three numbers come straight out of `nod`'s partition table, i.e. out of the source
+    /// image, and are subtracted from one another in several hot paths — the header sector count
+    /// (`data_start - start`), the data-region cluster count (`data_end - data_start`) — in
+    /// [`crate::disc_patch`] and [`crate::nfs`]. As `u32` arithmetic those subtractions wrap on a
+    /// malformed disc, turning a nonsense partition table into a multi-terabyte write (release)
+    /// or a subtract-overflow panic (debug). Validating the span once, where it is constructed,
+    /// makes every later subtraction sound without scattering checked arithmetic through the
+    /// encoder.
+    pub fn validate(&self) -> Result<()> {
+        if self.start_sector > self.data_start_sector
+            || self.data_start_sector > self.data_end_sector
+        {
+            return Err(Error::UnsupportedDisc(format!(
+                "partition {} has a malformed sector span: start {}, data start {}, data end {} \
+                 (expected start <= data start <= data end)",
+                self.index, self.start_sector, self.data_start_sector, self.data_end_sector
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl SourceDisc {
     /// Open a Wii disc image in decrypted mode.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -282,6 +306,10 @@ impl SourceDisc {
             data_end_sector: p.data_end_sector,
         };
         let mut partitions: Vec<PartitionSpan> = disc.partitions().iter().map(span_of).collect();
+        // Validate before anything subtracts these sector numbers (see `PartitionSpan::validate`).
+        for p in &partitions {
+            p.validate()?;
+        }
         partitions.sort_by_key(|p| p.start_sector);
         let data_partition = disc
             .partitions()
@@ -373,7 +401,7 @@ impl SourceDisc {
     /// Logical (hash-stripped) byte size of the data partition's data region — the address space
     /// [`SourceDisc::open_data_partition`] reads span.
     fn data_region_size(&self) -> u64 {
-        self.data_region_clusters() * LOG_CLUSTER
+        self.data_region_clusters() * CLUSTER_DATA_U64
     }
 
     /// Open the data partition for logical (hash-stripped) reads.
@@ -401,7 +429,7 @@ impl SourceDisc {
     /// the DOL header's 18 sections. Both are in the partition's logical (hash-stripped) data
     /// address space, which [`crate::disc_patch`] maps back to physical clusters.
     pub fn read_main_dol(&self) -> Result<MainDol> {
-        let ioerr = |e| Error::io("<partition>", e);
+        let ioerr = |e| Error::read("the data partition", e);
         let mut part = self.disc.open_partition_kind(PartitionKind::Data)?;
 
         let mut boot = [0u8; 0x440];
@@ -468,7 +496,7 @@ impl SourceDisc {
         let data_size = self.data_region_size();
 
         let mut part = self.open_data_partition()?;
-        let ioerr = |e| Error::io("<partition>", e);
+        let ioerr = |e| Error::read("the data partition", e);
 
         // boot.bin: main.dol and FST offsets (all logical, stored >> 2).
         let mut boot = [0u8; 0x440];
@@ -518,7 +546,7 @@ impl SourceDisc {
         // first and fail with a bare short read). `plan_group_runs` re-checks; this only fixes
         // *which* error a corrupt disc gets.
         for &(off, len) in &extents {
-            let _ = extent_groups(off, len, data_size)?;
+            extent_groups(off, len, data_size)?;
         }
 
         // Zero-fill trimming: find the wholly-zero FST files whose contained groups can be dropped.
@@ -665,6 +693,41 @@ impl GcImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn span(start: u32, data_start: u32, data_end: u32) -> PartitionSpan {
+        PartitionSpan {
+            index: 0,
+            start_sector: start,
+            data_start_sector: data_start,
+            data_end_sector: data_end,
+        }
+    }
+
+    /// An ordered span is accepted, including the degenerate cases (an empty header region or an
+    /// empty data region) — those are odd but arithmetically sound.
+    #[test]
+    fn validate_accepts_ordered_spans() {
+        span(10, 14, 100).validate().unwrap();
+        span(10, 10, 10).validate().unwrap();
+        span(0, 0, 1).validate().unwrap();
+    }
+
+    /// Out-of-order sectors are what would wrap the `u32` subtractions downstream, so they must be
+    /// rejected at construction with an error naming the sectors.
+    #[test]
+    fn validate_rejects_out_of_order_spans() {
+        for bad in [span(14, 10, 100), span(10, 101, 100), span(200, 14, 100)] {
+            let err = bad.validate().unwrap_err();
+            assert!(
+                matches!(err, Error::UnsupportedDisc(_)),
+                "expected an unsupported-disc error, got {err}"
+            );
+            let msg = err.to_string();
+            for n in [bad.start_sector, bad.data_start_sector, bad.data_end_sector] {
+                assert!(msg.contains(&n.to_string()), "error should name {n}: {msg}");
+            }
+        }
+    }
 
     /// Verify GameCube ingestion against a real image: probe reports GameCube, the game id and
     /// logical size are sane, and the first bytes are the game id (GameCube images have no magic
@@ -893,6 +956,43 @@ mod tests {
         // Just one byte over is enough.
         let h = dol_header(&[(0x100, 0xF01)]);
         assert!(dol_size_from_header(&h, 0x1000).is_err());
+    }
+
+    /// A zero-length extent always maps to `Ok(None)`, whatever its offset — including an offset
+    /// past `data_size`, which for any *non-zero* length would be rejected.
+    #[test]
+    fn extent_groups_zero_length_is_none_regardless_of_offset() {
+        let data_size = TEN_GROUPS * 0x7C00;
+        assert_eq!(extent_groups(0, 0, data_size).unwrap(), None);
+        assert_eq!(extent_groups(u64::MAX, 0, data_size).unwrap(), None);
+        assert_eq!(extent_groups(data_size + 1, 0, data_size).unwrap(), None);
+    }
+
+    /// A non-trivial extent's first/last group indices are computed correctly, an extent ending
+    /// exactly at `data_size` is accepted, one byte past is rejected, and an `off + len` overflow
+    /// is rejected rather than wrapping.
+    #[test]
+    fn extent_groups_bounds_and_group_math() {
+        let data_size = TEN_GROUPS * 0x7C00;
+
+        // Starts 100 bytes into group 2, spans 3 whole group-bytes: first group 2, last group 5
+        // (the range covers a sliver of group 5, since 3*GB + 100 crosses into it).
+        let off = 2 * GB + 100;
+        let len = 3 * GB;
+        let r = extent_groups(off, len, data_size).unwrap().unwrap();
+        assert_eq!(*r.start(), 2);
+        assert_eq!(*r.end(), 5);
+
+        // Ending exactly at data_size is in bounds.
+        assert!(extent_groups(data_size - 1, 1, data_size)
+            .unwrap()
+            .is_some());
+
+        // One byte past the end is rejected.
+        assert!(extent_groups(data_size - 1, 2, data_size).is_err());
+
+        // off + len overflowing u64 is rejected rather than wrapping.
+        assert!(extent_groups(u64::MAX, 2, data_size).is_err());
     }
 
     #[test]

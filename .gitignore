@@ -20,5 +20,9 @@ keys.txt
 # Editor / OS
 .DS_Store
 
+# Claude Code project state and scratch PR-body files (see CLAUDE.md's PR workflow)
+/.claude/
+/pr-*.md
+
 # Local sample injects (build artifacts)
 /build_*/

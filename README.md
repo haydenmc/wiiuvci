@@ -1,6 +1,6 @@
 # wiivci
 
-A cross-platform CLI that injects Wii games (ISO/RVZ/WBFS/…) **and GameCube games (via
+A CLI that injects Wii games (ISO/RVZ/WBFS/…) **and GameCube games (via
 [Nintendont](https://github.com/FIX94/Nintendont))** into Wii U Virtual Console titles —
 producing an installable WUP package you can sideload with
 [WUP Installer GX2](https://github.com/FIX94/wup-installer-gx2). It fills the same role as
@@ -28,12 +28,16 @@ The **Wii common key** is *not* required: `nod` decrypts Wii disc partitions int
 
 ## Usage
 
+Set the Wii U common key via the `WIIU_COMMON_KEY` environment variable, or point
+`--wiiu-common-key` at a key file — avoid the raw hex on the command line, since it lingers in
+shell history:
+
 ```sh
+export WIIU_COMMON_KEY=<32-hex>   # or: --wiiu-common-key /path/to/key/file
 wiivci \
   --input "Wii Sports (USA).rvz" \
   --base  "Rhythm Heaven Fever [00050000101B0700].wua" \
   --out   ./out \
-  --wiiu-common-key <32-hex> \
   --cert  ./title.cert \
   --title "Wii Sports"
 ```
@@ -41,10 +45,14 @@ wiivci \
 Then copy `./out` to `sd:/install/<name>/` and install with WUP Installer GX2. The target
 console needs signature patches (Aroma/Tiramisu/Mocha) to install and boot fakesigned titles.
 
-Useful options: `--icon/--boot-tv/--boot-drc <png>` to supply artwork, `--region jp|us|eu`,
-`--no-gamepad`, `--offline` (skip GameTDB/art lookups), `--work-dir <dir>` (keep the
-intermediate build tree). If no GamePad boot image is found (community art repos usually only
-carry the TV image), the TV image is reused for the GamePad splash so both screens match.
+Useful options: `--icon/--boot-tv/--boot-drc <png>` to supply artwork, `--region jp|us|eu`
+(default `us`), `--no-gamepad`, `--offline` (skip GameTDB/art lookups), `--work-dir <dir>` (keep
+the intermediate build tree instead of a temp dir that's deleted on exit). `--work-dir` must be a
+new or empty directory — the pipeline stages into `work_dir/content/` without clearing it first,
+so a dirty directory could silently get its leftovers (e.g. a previous, larger build's stale
+`hif_*.nfs`) packaged into the new title; the CLI refuses to reuse a non-empty one. If no GamePad
+boot image is found (community art repos usually only carry the TV image), the TV image is reused
+for the GamePad splash so both screens match.
 
 Disc storage: the data partition is stored sparsely, skipping the multi-GB inter-file gaps the game
 never reads (files stay at their original offsets — no compaction). `--keep-gaps` disables this and
@@ -90,21 +98,33 @@ wiivci \
   --input "Super Monkey Ball 2 (USA).rvz" \
   --base  "Rhythm Heaven Fever [00050000101B0700].wua" \
   --out   ./out \
-  --wiiu-common-key <32-hex> --cert ./title.cert \
+  --cert  ./title.cert \
   --title "Super Monkey Ball 2" \
   --widescreen
 ```
 
-A GameCube inject is, at the WUP level, a normal Wii VC title: the tool authors a small synthetic
-Wii disc whose `main.dol` is **Nintendont** and whose filesystem holds the GameCube image as
-`files/game.iso`. Nintendont boots and runs the game from the emulated disc. The **same Wii VC base**
-is used as for Wii injects.
+(`WIIU_COMMON_KEY` is read from the environment, as above.)
 
-Alongside the WUP package the tool writes a **`nincfg.bin`** (Nintendont's config) next to the
+A GameCube inject is, at the WUP level, a normal Wii VC title: the tool authors a small synthetic
+Wii disc whose `main.dol` is **FIX94's Nintendont autoboot forwarder** (a tiny shim, not
+Nintendont itself — see below) and whose filesystem holds the GameCube image as `files/game.iso`.
+The forwarder loads and runs Nintendont, which then boots the game from the emulated disc. The
+**same Wii VC base** is used as for Wii injects.
+
+Two things besides the WUP package must land on the SD card, or the inject installs fine but
+boots to a menu instead of the game:
+
+1. **Nintendont itself**, installed the normal Homebrew Channel way at
+   `sd:/apps/nintendont/boot.dol` (this tool does not download or bundle Nintendont — only the
+   small forwarder described below, which loads it from that path at boot).
+2. The generated **`nincfg.bin`** (see next paragraph).
+
+Alongside the WUP package the tool writes that **`nincfg.bin`** (Nintendont's config) next to the
 output — **copy it to your SD card root** (it is a 548-byte `NIN_CFG` v10 record; Nintendont
-silently ignores a config of any other size and drops to its menu instead of autobooting). Options that shape it: `--widescreen`, `--gc-language`,
-`--gc-video <auto|ntsc|pal50|pal60|mpal|progressive|none>`, `--no-memcard`,
-`--gc-memcard-blocks <59|123|251|507|1019>`, `--gc-max-pads <0-4>`, `--gc-gamepad-slot <0-3>`,
+silently ignores a config of any other size and drops to its menu instead of autobooting). Options that shape it: `--widescreen`, `--gc-language <auto|english|german|french|spanish|italian|dutch>`
+(default `auto`), `--gc-video <auto|ntsc|pal50|pal60|mpal|progressive|none>` (default `auto`),
+`--no-memcard`, `--gc-memcard-blocks <59|123|251|507|1019>` (default `251`),
+`--gc-max-pads <0-4>` (default `4`), `--gc-gamepad-slot <0-3>` (default `0`),
 and `--cheats <sd-path-to-.gct>`.
 
 > **These settings are effectively global.** Nintendont reads the one `nincfg.bin` at the SD-card
@@ -112,12 +132,16 @@ and `--cheats <sd-path-to-.gct>`.
 > but the settings from the most recently copied `nincfg.bin` apply to **all** installed GameCube
 > titles. If different games need different settings, keep per-game copies and swap the active one.
 
-Nintendont's `boot.dol` is downloaded automatically (a pinned build); supply your own with
-`--nintendont <boot.dol>` (required with `--offline`). Booting on real hardware also needs a Wii
-**apploader** in the synthetic disc — by default the genuine one is **extracted from the base
-title's own game disc** (a `.wua` or NUS base carries the original VC game's NFS; an
-already-stripped base directory does not, in which case a warning is printed). Override with
-`--apploader <apploader.img>` (e.g. one extracted from a Wii disc you own, or the open-source
+The **forwarder** (not Nintendont) is downloaded automatically (a pinned FIX94 build). At boot it
+reads `sd:/nincfg.bin` and loads Nintendont proper from `sd:/apps/nintendont/boot.dol` before
+autobooting the emulated disc — so installing Nintendont on the SD card (step 1 above) is required
+and separate from anything this tool writes. Supply your own forwarder build with
+`--nintendont <boot.dol>` (e.g. FIX94's `force_4_by_3` variant; required with `--offline`).
+Booting on real hardware also needs a Wii **apploader** in the synthetic disc — by default the
+genuine one is **extracted from the base title's own game disc** (a `.wua` or NUS base carries the
+original VC game's NFS; an already-stripped base directory does not, in which case a warning is
+printed). Override with `--apploader <apploader.img>` (e.g. one extracted from a Wii disc you own,
+or the open-source
 [HackMii/gc-linux apploader](https://hackmii.com/2008/08/open-source-apploader-iso-template/)).
 Without an apploader the package is structurally valid (and verifies against `nod`) but will not
 boot.
@@ -142,8 +166,10 @@ wiivci \
   --input "Wii Sports (USA).rvz" \
   --base-title-id  00050000101B0700 \
   --base-title-key <32-hex encrypted title key> \
-  --out ./out --wiiu-common-key <32-hex> --cert ./title.cert --title "Wii Sports"
+  --out ./out --cert ./title.cert --title "Wii Sports"
 ```
+
+(`WIIU_COMMON_KEY` is read from the environment, as in [Usage](#usage).)
 
 Only the contents needed for the base framework are downloaded — the base's own game data
 (`hif_*.nfs`, ~450 MB) is skipped since the injected game replaces it. `--base-version <n>`
@@ -167,7 +193,7 @@ pins a TMD version and `--nus-url <url>` points at a mirror.
 
 ## Building
 
-Requires a Rust toolchain (1.85+) and a C compiler (for `nod`'s compression backends).
+Requires a Rust toolchain (1.88+) and a C compiler (for `nod`'s compression backends).
 
 ```sh
 cargo build --release   # binary at target/release/wiivci
@@ -175,6 +201,10 @@ cargo test              # fast unit/format tests
 ```
 
 The dev container (`.devcontainer/`) provides the toolchain automatically.
+
+Prebuilt binaries (GitHub Releases) are produced for **Linux x86_64** (`musl`, static) and
+**Windows x86_64** only (see `.github/workflows/release.yml`). Other platforms — macOS, ARM — are
+expected to build from source with the steps above, but are untested.
 
 ## Validation
 
@@ -185,7 +215,8 @@ Correctness is anchored on a retail title used as ground truth (not committed):
 * the **FST**, **TMD** and **ticket** serializers reproduce a retail title's bytes exactly;
 * **content encryption** (non-hashed and the hashed H0–H3 tree) reproduces retail `.app`/
   `.h3` files byte-for-byte;
-* built packages are re-verified end-to-end: every content decrypts and matches its TMD hash.
+* the test suite re-verifies pipeline-built packages end-to-end (every content decrypts and
+  matches its TMD hash) — a test, not a step the CLI itself performs.
 
 Cross-validation tests are `#[ignore]`d and require local reference files plus
 `WIIU_COMMON_KEY`; the everyday `cargo test` run needs neither.
