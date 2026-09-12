@@ -984,9 +984,11 @@ mod tests {
         assert_eq!(*r.end(), 5);
 
         // Ending exactly at data_size is in bounds.
-        assert!(extent_groups(data_size - 1, 1, data_size)
-            .unwrap()
-            .is_some());
+        assert!(
+            extent_groups(data_size - 1, 1, data_size)
+                .unwrap()
+                .is_some()
+        );
 
         // One byte past the end is rejected.
         assert!(extent_groups(data_size - 1, 2, data_size).is_err());
@@ -998,7 +1000,7 @@ mod tests {
     #[test]
     fn fully_contained_groups_excludes_boundary_groups() {
         let gb = 64 * 0x7C00u64; // logical bytes per hash group
-                                 // Group-aligned file of exactly 3 groups: all three are fully contained.
+        // Group-aligned file of exactly 3 groups: all three are fully contained.
         assert_eq!(fully_contained_groups(0, 3 * gb, gb), 0..3);
         // Offset mid-group: the partial leading and trailing groups are excluded.
         assert_eq!(fully_contained_groups(gb / 2, 3 * gb, gb), 1..3);

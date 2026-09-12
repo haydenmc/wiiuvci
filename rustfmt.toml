@@ -1,3 +1,0 @@
-# Temporary: keep the 2021 formatting style for the edition-bump commit so its diff is purely
-# semantic. The next commit removes this file and reformats under the 2024 style edition.
-style_edition = "2021"

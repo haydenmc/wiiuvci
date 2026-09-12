@@ -7,10 +7,10 @@
 //! `Result`, since it decodes untrusted/possibly-corrupt input). This module holds only the
 //! identical cipher call; callers keep their own error-handling semantics on top.
 
+use aes::Aes128;
 use aes::cipher::block_padding::{NoPadding, UnpadError};
 use aes::cipher::inout::PadError;
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use aes::Aes128;
 
 pub(crate) type Key = [u8; 16];
 

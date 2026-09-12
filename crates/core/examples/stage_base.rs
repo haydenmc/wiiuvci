@@ -2,7 +2,7 @@
 //! Run: cargo run -p wiivci-core --release --example stage_base -- <base.wua|dir> <out_dir>
 mod common;
 
-use wiivci_core::base::{open_base, REQUIRED_CODE_FILES};
+use wiivci_core::base::{REQUIRED_CODE_FILES, open_base};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

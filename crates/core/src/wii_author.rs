@@ -38,11 +38,11 @@ use sha1::{Digest, Sha1};
 
 use crate::consts::{CLUSTER_DATA, HASH_BLOCK, SECTORS_PER_GROUP, TMD_CONTENT0_HASH};
 use crate::disc_patch::{
-    h3_entry_mut, recompute_group, DiscPlan, PartitionPlan, StoredGroups, H3_TABLE_SIZE,
-    MAX_H3_GROUPS,
+    DiscPlan, H3_TABLE_SIZE, MAX_H3_GROUPS, PartitionPlan, StoredGroups, h3_entry_mut,
+    recompute_group,
 };
 use crate::error::{Error, Result};
-use crate::input::{DecryptedDisc, PartitionSpan, ReadSeek, DISC_SECTOR_SIZE};
+use crate::input::{DISC_SECTOR_SIZE, DecryptedDisc, PartitionSpan, ReadSeek};
 use crate::util::align_up;
 
 const SECTOR: u64 = DISC_SECTOR_SIZE as u64; // 0x8000
@@ -250,11 +250,11 @@ fn build_sys_blob(
     put_u32(&mut sys, 0x18, DISC_MAGIC_WII); // partition boot.bin Wii magic
     write_title(&mut sys[0x20..0x20 + 0x40], disc_title);
     put_u32(&mut sys, 0x60, 0x0101_0000); // "disable hash/encryption" boot flags
-                                          // FST load target in MEM1 and its reserved length; the apploader loads the FST here.
+    // FST load target in MEM1 and its reserved length; the apploader loads the FST here.
     put_u32(&mut sys, 0x430, 0x803F_FF60); // user position (FST address)
     put_u32(&mut sys, 0x434, 0x0006_0000); // user length
     put_u32(&mut sys, 0x438, 0x0424_FFF8); // (matches the reference template)
-                                           // bi2.bin fields the reference sets (country at +0x18 stays 0, as in the reference).
+    // bi2.bin fields the reference sets (country at +0x18 stays 0, as in the reference).
     put_u32(&mut sys, BOOT_BIN_LEN + 0x1C, 0x0000_0001);
     put_u32(&mut sys, BOOT_BIN_LEN + 0x20, 0x0000_0001);
     put_u32(&mut sys, BOOT_BIN_LEN + 0x24, 0x0000_0005);
@@ -352,9 +352,9 @@ fn build_wii_ticket(title_id: u64) -> Vec<u8> {
     // ticket — reboot). 0x1E6 (ticket title version) stays zero, as on the reference inject.
     t[0x1E4..0x1E6].copy_from_slice(&0xFFFFu16.to_be_bytes());
     t[0x1F1] = 0; // common key index
-                  // Content-access permission mask (0x222, one bit per content index): grant access
-                  // to every content. Left zero, the framework treats the disc's content as
-                  // inaccessible; a valid ticket grants it (the reference inject sets this too).
+    // Content-access permission mask (0x222, one bit per content index): grant access
+    // to every content. Left zero, the framework treats the disc's content as
+    // inaccessible; a valid ticket grants it (the reference inject sets this too).
     t[0x222..0x242].copy_from_slice(&[0xFF; 0x20]);
     // A stray byte inside the reference ticket's access-permission area; matched for byte-identity.
     t[0x24C] = 0x02;
@@ -378,7 +378,7 @@ fn build_wii_tmd(title_id: u64, h3_hash: &[u8; 20]) -> Vec<u8> {
     m[0x198..0x19A].copy_from_slice(b"01"); // group id (matches the reference)
     m[0x19A] = 0x03; // "zero"/region area byte the reference carries (retail TMDs vary here too)
     m[0x1DE..0x1E0].copy_from_slice(&1u16.to_be_bytes()); // one content
-                                                          // Content record 0 at 0x1E4: id, index, type, size, hash.
+    // Content record 0 at 0x1E4: id, index, type, size, hash.
     put_u32(&mut m, 0x1E4, 0); // content id
     m[0x1E8..0x1EA].copy_from_slice(&0u16.to_be_bytes()); // index
     m[0x1EA..0x1EC].copy_from_slice(&3u16.to_be_bytes()); // type (reference uses 0x0003 for the disc content)
@@ -600,9 +600,9 @@ fn build_disc_header(game_id: &[u8; 6], disc_title: &str) -> Vec<u8> {
     put_u32(&mut p, pt + 4, ((PARTITION_TABLE_ABS + 0x20) >> 2) as u32); // info table offset
     put_u32(&mut p, pt + 0x20, (PART_ABS >> 2) as u32); // partition offset
     put_u32(&mut p, pt + 0x24, 0); // type 0 = DATA
-                                   // Two `wit` artefacts the reference carrier disc carries (matched for byte-identity; both are
-                                   // dead data): group 1 has zero partitions but still points its info table at 0x20, and the
-                                   // otherwise-unused sector at 0x48000 holds a u32 9 at +0xC.
+    // Two `wit` artefacts the reference carrier disc carries (matched for byte-identity; both are
+    // dead data): group 1 has zero partitions but still points its info table at 0x20, and the
+    // otherwise-unused sector at 0x48000 holds a u32 9 at +0xC.
     put_u32(&mut p, pt + 0x0C, 0x20 >> 2);
     put_u32(&mut p, 0x4800C, 9);
     put_u32(&mut p, DISC_MAGIC2_ABS, DISC_MAGIC2);

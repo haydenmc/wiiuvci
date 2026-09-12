@@ -26,8 +26,8 @@ use crate::consts::{
     SECTORS_PER_GROUP, SECTORS_PER_SUBGROUP, SUBBLOCK, TMD_CONTENT0_HASH, WII_SIG,
 };
 use crate::error::{Error, Result};
-use crate::input::{SourceDisc, DISC_SECTOR_SIZE};
-use crate::video::{find_dol_edits, VideoPatches};
+use crate::input::{DISC_SECTOR_SIZE, SourceDisc};
+use crate::video::{VideoPatches, find_dol_edits};
 
 /// `u64` form of [`DISC_SECTOR_SIZE`]: absolute disc offsets below are all `u64`.
 const SECTOR_U64: u64 = DISC_SECTOR_SIZE as u64;

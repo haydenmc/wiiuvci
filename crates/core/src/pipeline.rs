@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::assets::images::{png_to_tga, BootTexture};
+use crate::assets::images::{BootTexture, png_to_tga};
 use crate::assets::{artrepo, gametdb};
 use crate::base::{BaseSource, StagedBase};
 use crate::consts::{TMD_CONTENT0_HASH, WII_SIG};
@@ -21,12 +21,12 @@ use crate::fwimg;
 use crate::input::{GcImage, SourceDisc};
 use crate::keys::WiiUCommonKey;
 use crate::meta::appxml;
-use crate::meta::metaxml::{patch as patch_meta, MetaOptions};
+use crate::meta::metaxml::{MetaOptions, patch as patch_meta};
 use crate::meta::titleid;
 use crate::nfs::build_nfs;
 use crate::nincfg::{self, NincfgOptions};
 use crate::package::cert::CertChain;
-use crate::package::{build_package, PackageParams, PackageStats};
+use crate::package::{PackageParams, PackageStats, build_package};
 use crate::video::VideoPatches;
 use crate::wii_author::{self, GcDiscInputs};
 

@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::assets::http_client;
-use crate::base::{finalize_stage, is_base_game_nfs, BaseSource, StagedBase};
+use crate::base::{BaseSource, StagedBase, finalize_stage, is_base_game_nfs};
 use crate::error::{Error, Result};
 use crate::package::extract::extract_title;
 use crate::package::ticket::decrypt_title_key;

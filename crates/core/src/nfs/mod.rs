@@ -17,10 +17,10 @@ use std::path::Path;
 
 use crate::consts::{CLUSTER_DATA_U64, SECTORS_PER_GROUP, SECTORS_PER_GROUP_U64};
 use crate::disc_patch::{
-    apply_edits_to_group, recompute_group, DiscPlan, PartitionPlan, StoredGroups,
+    DiscPlan, PartitionPlan, StoredGroups, apply_edits_to_group, recompute_group,
 };
 use crate::error::{Error, Result};
-use crate::input::{DecryptedDisc, DISC_SECTOR_SIZE};
+use crate::input::{DISC_SECTOR_SIZE, DecryptedDisc};
 use eggs::{EggsHeader, LbaRange, MAX_RANGES};
 use split::SplitWriter;
 
@@ -67,7 +67,7 @@ fn group_runs(pp: &PartitionPlan, index: usize) -> Result<Vec<GroupRun>> {
         StoredGroups::Runs(runs) if runs.is_empty() => {
             return Err(Error::FormatLimit(format!(
                 "partition {index} stores no hash groups"
-            )))
+            )));
         }
         StoredGroups::Runs(runs) => runs
             .iter()
@@ -912,7 +912,7 @@ mod tests {
     /// plan carries is compared against, never written from.
     #[test]
     fn h3_cross_check_reports_a_corrupted_table_entry() {
-        use crate::wii_author::{author_gc_disc, GcDiscInputs};
+        use crate::wii_author::{GcDiscInputs, author_gc_disc};
         use std::io::Cursor;
 
         let iso: Vec<u8> = (0..200_000u32)

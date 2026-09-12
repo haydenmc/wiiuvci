@@ -5,5 +5,5 @@ pub mod metaxml;
 pub mod titleid;
 
 pub use appxml::generate as generate_app_xml;
-pub use metaxml::{patch as patch_meta_xml, MetaOptions};
-pub use titleid::{derive as derive_title_ids, TitleIds};
+pub use metaxml::{MetaOptions, patch as patch_meta_xml};
+pub use titleid::{TitleIds, derive as derive_title_ids};

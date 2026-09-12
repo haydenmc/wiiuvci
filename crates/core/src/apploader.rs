@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn round_trips_through_an_authored_nfs() {
         use crate::nfs::build_nfs;
-        use crate::wii_author::{author_gc_disc, GcDiscInputs};
+        use crate::wii_author::{GcDiscInputs, author_gc_disc};
         use std::io::Cursor;
 
         let apploader = fake_apploader();

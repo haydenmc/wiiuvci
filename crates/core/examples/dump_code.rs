@@ -3,7 +3,7 @@
 mod common;
 
 use std::path::Path;
-use wiivci_core::package::extract::{extract_title, ContentReader};
+use wiivci_core::package::extract::{ContentReader, extract_title};
 use wiivci_core::package::tmd::parse_content_records;
 
 struct DirReader<'a>(&'a Path);
