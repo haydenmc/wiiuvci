@@ -116,14 +116,14 @@ fn check_length(field: &str, start: &BytesStart, text: &str) -> Result<()> {
             }
         }
         Some("hexBinary") => {
-            if let Some(expected_chars) = limit.checked_mul(2) {
-                if text.len() != expected_chars {
-                    return Err(Error::FormatLimit(format!(
-                        "meta.xml field `{field}` value is {} hex chars, but its declared \
-                         length={limit} expects exactly {expected_chars}",
-                        text.len()
-                    )));
-                }
+            if let Some(expected_chars) = limit.checked_mul(2)
+                && text.len() != expected_chars
+            {
+                return Err(Error::FormatLimit(format!(
+                    "meta.xml field `{field}` value is {} hex chars, but its declared \
+                     length={limit} expects exactly {expected_chars}",
+                    text.len()
+                )));
             }
         }
         _ => {}

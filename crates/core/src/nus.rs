@@ -72,13 +72,13 @@ impl NusClient {
                 resp.status()
             )));
         }
-        if let Some(len) = resp.content_length() {
-            if len > MAX_RESPONSE_BYTES {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "GET {url}: Content-Length {len} exceeds the {MAX_RESPONSE_BYTES}-byte sanity \
-                     limit; refusing to download it"
-                )));
-            }
+        if let Some(len) = resp.content_length()
+            && len > MAX_RESPONSE_BYTES
+        {
+            return Err(Error::Other(anyhow::anyhow!(
+                "GET {url}: Content-Length {len} exceeds the {MAX_RESPONSE_BYTES}-byte sanity \
+                 limit; refusing to download it"
+            )));
         }
         // Stream the body via `Read` rather than `Response::bytes()`: `bytes()` runs the whole
         // body download under the client's single `timeout`, so any content that takes longer

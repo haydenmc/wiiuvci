@@ -438,13 +438,13 @@ fn base_disc_extras(
     // The materialized copy (up to a few hundred MB) is only needed for the small reads above.
     // A failure here is not fatal — the whole work_dir is temporary — but it is worth saying,
     // since it leaves those hundreds of MB occupied for the rest of the build.
-    if let Err(e) = std::fs::remove_dir_all(&nfs_scratch) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!(
-                "could not remove the scratch copy of the base disc at {} ({e})",
-                nfs_scratch.display()
-            );
-        }
+    if let Err(e) = std::fs::remove_dir_all(&nfs_scratch)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "could not remove the scratch copy of the base disc at {} ({e})",
+            nfs_scratch.display()
+        );
     }
     extras
 }

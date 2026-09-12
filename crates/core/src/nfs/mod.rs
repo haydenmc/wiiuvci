@@ -466,10 +466,10 @@ fn write_partition<R: Read + Seek + ?Sized>(
             // whatever the mastering tool put there, so a disagreement would say nothing about our
             // rebuild. Every whole group is checked.
             let last_sector = (g as u64 + 1) * SECTORS_PER_GROUP_U64 - 1;
-            if last_sector < total {
-                if let Some(matches) = h3_entry_matches(&pp.h3_table, g, &h3) {
-                    check.record(g, matches);
-                }
+            if last_sector < total
+                && let Some(matches) = h3_entry_matches(&pp.h3_table, g, &h3)
+            {
+                check.record(g, matches);
             }
 
             for (k, cluster) in clusters.iter_mut().enumerate() {
@@ -482,13 +482,13 @@ fn write_partition<R: Read + Seek + ?Sized>(
             }
 
             done += 1;
-            if let Some(step) = step {
-                if done.is_multiple_of(step) || done == total_groups {
-                    log::info!(
-                        "NFS: {done}/{total_groups} hash groups ({}%)",
-                        done * 100 / total_groups
-                    );
-                }
+            if let Some(step) = step
+                && (done.is_multiple_of(step) || done == total_groups)
+            {
+                log::info!(
+                    "NFS: {done}/{total_groups} hash groups ({}%)",
+                    done * 100 / total_groups
+                );
             }
         }
     }
