@@ -12,8 +12,9 @@ A single-binary Rust reimplementation of the Wii/GameCube → Wii U Virtual Cons
 
 - `crates/core` — `wiivci-core` (all the logic: disc reading, NFS, hash tree, WUP packaging).
 - `crates/cli` — `wiivci` (the CLI).
-- Rust edition 2021, toolchain 1.85+. `crates/core/examples/` holds read-only diagnostic tools
-  (`fst_layout`, `disc_cmp`, `recon_disc`, …) — handy oracles when debugging a disc.
+- Rust edition 2021, toolchain 1.88+ (the `rust-version` in `Cargo.toml`; the CI MSRV job keeps
+  it honest). `crates/core/examples/` holds read-only diagnostic tools (`fst_layout`, `disc_cmp`,
+  `recon_disc`, …) — handy oracles when debugging a disc.
 
 ## Build & gates (run all three before calling anything done)
 

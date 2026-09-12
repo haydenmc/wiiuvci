@@ -193,7 +193,7 @@ pins a TMD version and `--nus-url <url>` points at a mirror.
 
 ## Building
 
-Requires a Rust toolchain (1.85+) and a C compiler (for `nod`'s compression backends).
+Requires a Rust toolchain (1.88+) and a C compiler (for `nod`'s compression backends).
 
 ```sh
 cargo build --release   # binary at target/release/wiivci
