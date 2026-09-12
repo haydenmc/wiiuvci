@@ -483,7 +483,7 @@ fn write_partition<R: Read + Seek + ?Sized>(
 
             done += 1;
             if let Some(step) = step {
-                if done % step == 0 || done == total_groups {
+                if done.is_multiple_of(step) || done == total_groups {
                     log::info!(
                         "NFS: {done}/{total_groups} hash groups ({}%)",
                         done * 100 / total_groups

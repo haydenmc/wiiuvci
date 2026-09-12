@@ -261,7 +261,7 @@ pub fn decode_nonhashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>>
 /// `cipher`'s length is not an exact multiple of [`HASH_BLOCK_TOTAL`] (0x10000) — reachable from
 /// a truncated/corrupted HTTP download or user-supplied file.
 pub fn decode_hashed(key: &Key, index: u16, cipher: &[u8]) -> Result<Vec<u8>> {
-    if cipher.len() % HASH_BLOCK_TOTAL != 0 {
+    if !cipher.len().is_multiple_of(HASH_BLOCK_TOTAL) {
         return Err(Error::InvalidTitle(format!(
             "hashed content ciphertext length {} is not a multiple of the hashed block size (0x{HASH_BLOCK_TOTAL:x})",
             cipher.len()
